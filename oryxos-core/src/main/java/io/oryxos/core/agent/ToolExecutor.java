@@ -35,9 +35,10 @@ public class ToolExecutor {
   private final Map<String, String> mcpToolOwners;
   private final ProfileRegistry profileRegistry;
   private final ToolInvocationAuditor auditor;
+  private final AgentRunEventPublisher events;
 
   public ToolExecutor(Map<String, OryxTool> tools, ToolInvocationAuditor auditor) {
-    this(tools, Map.of(), null, auditor);
+    this(tools, Map.of(), null, auditor, null);
   }
 
   /** 31 节：注入 MCP 工具归属表 + ProfileRegistry，用以按调用方 Agent 的 mcp_servers 声明做白名单校验。 */
@@ -46,17 +47,40 @@ public class ToolExecutor {
       Map<String, String> mcpToolOwners,
       ProfileRegistry profileRegistry,
       ToolInvocationAuditor auditor) {
+    this(tools, mcpToolOwners, profileRegistry, auditor, null);
+  }
+
+  public ToolExecutor(
+      Map<String, OryxTool> tools,
+      Map<String, String> mcpToolOwners,
+      ProfileRegistry profileRegistry,
+      ToolInvocationAuditor auditor,
+      AgentRunEventPublisher events) {
     this.tools = tools;
     this.mcpToolOwners = mcpToolOwners;
     this.profileRegistry = profileRegistry;
     this.auditor = auditor;
+    this.events = events;
   }
 
   @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
       value = "CRLF_INJECTION_LOGS",
       justification = "日志中的工具名已经 sanitize() 消去 CR/LF；taint 分析不跨方法追踪该消毒，故局部抑制")
   public ToolResult execute(String sessionId, String agentName, ToolCallRequest call) {
+    if (AgentRunExecutionContext.isCancelRequested()) {
+      throw new RunCancelledException();
+    }
     long startedAt = System.currentTimeMillis();
+    String toolCallId = call.id() == null || call.id().isBlank() ? call.name() : call.id();
+    publish(
+        AgentRunEventTypes.TOOL_CALL_STARTED,
+        java.util.Map.of(
+            "toolCallId",
+            toolCallId,
+            "toolName",
+            call.name(),
+            "inputSummary",
+            AgentRunEventPayloads.summarizeJson(call.argumentsJson())));
     OryxTool tool = tools.get(call.name());
     if (tool == null) {
       return fail(sessionId, call, "未注册的工具: " + call.name(), startedAt);
@@ -95,6 +119,7 @@ public class ToolExecutor {
       } catch (RuntimeException auditFailure) {
         LOG.error("工具调用审计落库失败（结果照常返回）: tool={}", sanitize(call.name()), auditFailure);
       }
+      publishToolFinished(call, toolCallId, result, startedAt);
       return result;
     } finally {
       ToolExecutionContext.clear();
@@ -140,7 +165,43 @@ public class ToolExecutor {
     } catch (RuntimeException auditFailure) {
       LOG.error("工具调用失败的审计落库也失败（失败结果照常返回）: tool={}", sanitize(call.name()), auditFailure);
     }
+    String toolCallId = call.id() == null || call.id().isBlank() ? call.name() : call.id();
+    publish(
+        AgentRunEventTypes.TOOL_CALL_FINISHED,
+        java.util.Map.of(
+            "toolCallId",
+            toolCallId,
+            "toolName",
+            call.name(),
+            "success",
+            false,
+            "error",
+            AgentRunEventPayloads.summarizeText(errorMessage),
+            "durationMs",
+            System.currentTimeMillis() - startedAt));
     return ToolResult.error(errorMessage, false);
+  }
+
+  private void publishToolFinished(
+      ToolCallRequest call, String toolCallId, ToolResult result, long startedAt) {
+    java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+    payload.put("toolCallId", toolCallId);
+    payload.put("toolName", call.name());
+    payload.put("success", result.success());
+    payload.put("durationMs", System.currentTimeMillis() - startedAt);
+    if (result.success()) {
+      payload.put("outputSummary", AgentRunEventPayloads.summarizeText(result.content()));
+    } else {
+      payload.put("error", AgentRunEventPayloads.summarizeText(result.errorMessage()));
+    }
+    publish(AgentRunEventTypes.TOOL_CALL_FINISHED, payload);
+  }
+
+  private void publish(String type, java.util.Map<String, Object> payload) {
+    if (events == null) {
+      return;
+    }
+    events.publishCurrent(type, payload);
   }
 
   /** 日志参数消毒：去掉换行，防日志伪造（CRLF injection）。 */

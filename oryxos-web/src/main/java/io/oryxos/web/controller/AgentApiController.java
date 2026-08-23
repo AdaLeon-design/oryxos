@@ -290,6 +290,7 @@ public class AgentApiController {
             name,
             TRIGGER_SOURCE_MANUAL,
             session.sessionId(),
+            message,
             () -> agentService.process(session, message));
     return ApiResponse.ok(new TriggerResponse(executionId, "RUNNING"));
   }
