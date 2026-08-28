@@ -59,6 +59,7 @@ class ToolExecutorTest {
     verify(auditor)
         .record(
             eq("s-1"),
+            eq("agent-x"),
             eq("http_get"),
             contains("wttr.in"),
             contains("晴"),
@@ -73,7 +74,15 @@ class ToolExecutorTest {
     when(httpGet.execute(any())).thenReturn(ToolResult.ok("ok"));
     doThrow(new IllegalStateException("audit unavailable"))
         .when(auditor)
-        .record(eq("s-1"), eq("http_get"), anyString(), eq("ok"), eq(true), isNull(), anyLong());
+        .record(
+            eq("s-1"),
+            eq("agent-x"),
+            eq("http_get"),
+            anyString(),
+            eq("ok"),
+            eq(true),
+            isNull(),
+            anyLong());
 
     // 工具已执行完、副作用已发生：审计存储抖动不能让循环把这次执行当失败（否则模型可能重调有副作用的工具）
     ToolResult result =
@@ -84,7 +93,15 @@ class ToolExecutorTest {
     assertEquals("ok", result.content());
     verify(httpGet, times(1)).execute(any());
     verify(auditor, times(1))
-        .record(eq("s-1"), eq("http_get"), anyString(), eq("ok"), eq(true), isNull(), anyLong());
+        .record(
+            eq("s-1"),
+            eq("agent-x"),
+            eq("http_get"),
+            anyString(),
+            eq("ok"),
+            eq(true),
+            isNull(),
+            anyLong());
   }
 
   @Test
@@ -93,7 +110,7 @@ class ToolExecutorTest {
     when(httpGet.execute(any())).thenThrow(new RuntimeException("connect timeout"));
     doThrow(new IllegalStateException("audit unavailable"))
         .when(auditor)
-        .record(any(), anyString(), any(), any(), eq(false), anyString(), anyLong());
+        .record(any(), any(), anyString(), any(), any(), eq(false), anyString(), anyLong());
 
     ToolResult result =
         assertDoesNotThrow(
@@ -118,6 +135,7 @@ class ToolExecutorTest {
     verify(auditor)
         .record(
             eq("s-1"),
+            eq("agent-x"),
             eq("http_get"),
             anyString(),
             isNull(),
@@ -137,6 +155,7 @@ class ToolExecutorTest {
     verify(auditor)
         .record(
             eq("s-1"),
+            eq("agent-x"),
             eq("http_get"),
             anyString(),
             isNull(),
@@ -156,6 +175,7 @@ class ToolExecutorTest {
     verify(auditor)
         .record(
             eq("s-1"),
+            eq("agent-x"),
             eq("no_such_tool"),
             anyString(),
             isNull(),
@@ -191,7 +211,14 @@ class ToolExecutorTest {
     assertFalse(result.success());
     verify(auditor)
         .record(
-            eq("s-1"), eq("http_get"), anyString(), isNull(), eq(false), anyString(), anyLong());
+            eq("s-1"),
+            eq("agent-x"),
+            eq("http_get"),
+            anyString(),
+            isNull(),
+            eq(false),
+            anyString(),
+            anyLong());
   }
 
   @Test

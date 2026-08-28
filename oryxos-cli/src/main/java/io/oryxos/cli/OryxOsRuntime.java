@@ -23,6 +23,7 @@ import io.oryxos.core.memory.MemoryService;
 import io.oryxos.core.notify.NotifyChannelRegistry;
 import io.oryxos.core.profile.ProfileRegistry;
 import io.oryxos.core.provider.LlmCallAuditor;
+import io.oryxos.core.provider.PricingStore;
 import io.oryxos.core.provider.ProviderDef;
 import io.oryxos.core.provider.ProviderRegistry;
 import io.oryxos.core.provider.ProviderService;
@@ -52,16 +53,21 @@ import io.oryxos.provider.SpringAiProviderServiceImpl;
 import io.oryxos.provider.ToolSchemaAdapter;
 import io.oryxos.storage.AgentExecutionRepository;
 import io.oryxos.storage.AgentRunEventRepository;
+import io.oryxos.storage.ApiKeyRepository;
+import io.oryxos.storage.ApiKeyService;
+import io.oryxos.storage.AuditSchemaUpgrade;
 import io.oryxos.storage.JpaAgentExecutionStore;
 import io.oryxos.storage.JpaAgentRunEventStore;
 import io.oryxos.storage.JpaLlmCallAuditor;
 import io.oryxos.storage.JpaNotifyChannelRegistry;
+import io.oryxos.storage.JpaPricingStore;
 import io.oryxos.storage.JpaProviderRegistry;
 import io.oryxos.storage.JpaSandboxWhitelistStore;
 import io.oryxos.storage.JpaScheduledTaskStore;
 import io.oryxos.storage.JpaSessionManager;
 import io.oryxos.storage.JpaToolInvocationAuditor;
 import io.oryxos.storage.LlmCallRepository;
+import io.oryxos.storage.LlmPricingRepository;
 import io.oryxos.storage.LlmProviderRepository;
 import io.oryxos.storage.MemoryEntryRepository;
 import io.oryxos.storage.NotifyChannelRepository;
@@ -186,14 +192,32 @@ public class OryxOsRuntime {
   }
 
   @Bean
-  ProviderService providerService(ProviderRegistry providerRegistry, LlmCallAuditor auditor) {
+  PricingStore pricingStore(LlmPricingRepository repository) {
+    return new JpaPricingStore(repository);
+  }
+
+  /** 016 审计看板：llm_calls/tool_invocations 补列 + 建 llm_pricing 表（幂等，先跑 schema.sql）。 */
+  @Bean
+  @DependsOn("dataSourceScriptDatabaseInitializer")
+  AuditSchemaUpgrade auditSchemaUpgrade(DataSource dataSource) {
+    return new AuditSchemaUpgrade(dataSource);
+  }
+
+  @Bean
+  ProviderService providerService(
+      ProviderRegistry providerRegistry,
+      LlmCallAuditor auditor,
+      PricingStore pricingStore,
+      AuditSchemaUpgrade auditSchemaUpgrade) {
+    auditSchemaUpgrade.upgrade(); // 幂等：存量库补列 + 建 llm_pricing 表
     // 动态解析（31 节）：按名从注册表取参数、经工厂即时建/缓存 ChatModel（宪法 III 显式映射，只是运行时可变）
     ProviderChatModelFactory factory = new ProviderChatModelFactory();
     return new SpringAiProviderServiceImpl(
         providerRegistry,
         def -> factory.buildOne(def.name(), def.apiKey(), def.baseUrl()),
         new ToolSchemaAdapter(),
-        auditor);
+        auditor,
+        pricingStore);
   }
 
   @Bean
@@ -528,6 +552,9 @@ public class OryxOsRuntime {
    *
    * <p>提取为 static 方法便于单测直接验证超时行为（无需启 Spring 容器），模式同 {@code
    * ProviderChatModelFactory.timeoutFactory()}。
+   *
+   * <p>同时 {@code followRedirects(NEVER)}：默认 NORMAL 会跟随 302；Mem0 等客户端会附带 {@code
+   * Authorization}/{@code X-API-Key}，恶意或被劫持的 {@code memory.mem0.base-url} 可把请求拐到内网/元数据。
    */
   static JdkClientHttpRequestFactory toolHttpRequestFactory() {
     Duration connectTimeout =
@@ -539,7 +566,10 @@ public class OryxOsRuntime {
             Long.getLong(TOOL_HTTP_READ_TIMEOUT_PROP, DEFAULT_TOOL_HTTP_READ_TIMEOUT_SECONDS));
     JdkClientHttpRequestFactory factory =
         new JdkClientHttpRequestFactory(
-            HttpClient.newBuilder().connectTimeout(connectTimeout).build());
+            HttpClient.newBuilder()
+                .connectTimeout(connectTimeout)
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build());
     factory.setReadTimeout(readTimeout);
     return factory;
   }
@@ -776,6 +806,12 @@ public class OryxOsRuntime {
     return new WebSessionService(repository, sessionTtl);
   }
 
+  /** 018-rest-api-key：REST API Key 生成/校验/吊销（只存 SHA-256 哈希，明文仅生成时返回一次）。 */
+  @Bean
+  ApiKeyService apiKeyService(ApiKeyRepository repository) {
+    return new ApiKeyService(repository);
+  }
+
   @Bean
   NotifyChannelRegistry notifyChannelRegistry(NotifyChannelRepository repository) {
     return new JpaNotifyChannelRegistry(repository);
@@ -790,6 +826,70 @@ public class OryxOsRuntime {
   @Bean
   CliChannel cliChannel(AgentService agentService, SessionManager sessionManager) {
     return new CliChannel(agentService, sessionManager);
+  }
+
+  // ── 017：入站 IM 渠道（飞书长连接）────────────────────────────────────────
+
+  @Bean
+  io.oryxos.core.channel.ChannelConfigLoader channelConfigLoader() {
+    return new io.oryxos.core.channel.ChannelConfigLoader(oryxosRoot().resolve("channels.yaml"));
+  }
+
+  @Bean
+  io.oryxos.core.channel.MessageDeduplicator messageDeduplicator() {
+    return new io.oryxos.core.channel.MessageDeduplicator();
+  }
+
+  @Bean
+  io.oryxos.core.channel.InboundChannelRegistry inboundChannelRegistry() {
+    return new io.oryxos.core.channel.InboundChannelRegistry();
+  }
+
+  @Bean
+  io.oryxos.core.channel.InboundMessageService inboundMessageService(
+      AgentService agentService,
+      SessionManager sessionManager,
+      ProfileRegistry profileRegistry,
+      AgentExecutionService agentExecutionService,
+      io.oryxos.core.channel.MessageDeduplicator messageDeduplicator) {
+    return new io.oryxos.core.channel.InboundMessageService(
+        agentService,
+        sessionManager,
+        profileRegistry,
+        agentExecutionService,
+        messageDeduplicator,
+        java.time.Duration.ofSeconds(15)); // 「处理中」提示阈值（Edge Case：先行告知）
+  }
+
+  /** 渠道出站守卫：渠道自建 HTTP 不被沙箱自动拦截，经此显式复用 http 域名白名单（宪法 VI / 017 R7）。 */
+  @Bean
+  io.oryxos.core.channel.OutboundGuard channelOutboundGuard(WhitelistSandbox sandbox) {
+    return url ->
+        sandbox.enforce(
+            new io.oryxos.tool.sandbox.SandboxAction(
+                io.oryxos.tool.sandbox.ActionType.HTTP_REQUEST, url));
+  }
+
+  /**
+   * 渠道管理：落盘 + 断旧建新即生效（无需重启，复刻 MCP admin 模式）。initMethod=startAll 启动恢复全部渠道， 单条失败登记 ERROR
+   * 点名原因不阻断启动；destroyMethod=stopAll 关闭时断开长连接。
+   */
+  @Bean(initMethod = "startAll", destroyMethod = "stopAll")
+  io.oryxos.core.channel.ChannelAdminService channelAdminService(
+      io.oryxos.core.channel.ChannelConfigLoader channelConfigLoader,
+      io.oryxos.core.channel.InboundChannelRegistry inboundChannelRegistry,
+      ProfileRegistry profileRegistry,
+      io.oryxos.core.channel.InboundMessageService inboundMessageService,
+      io.oryxos.core.channel.OutboundGuard channelOutboundGuard) {
+    return new io.oryxos.core.channel.ChannelAdminService(
+        channelConfigLoader,
+        inboundChannelRegistry,
+        profileRegistry,
+        Map.of(
+            io.oryxos.channel.feishu.FeishuChannelAdapter.TYPE,
+            resolved ->
+                new io.oryxos.channel.feishu.FeishuChannelAdapter(
+                    resolved, profileRegistry, inboundMessageService, channelOutboundGuard)));
   }
 
   /**

@@ -1,5 +1,6 @@
 package io.oryxos.tool.builtin;
 
+import io.oryxos.core.memory.MemoryMdGuard;
 import io.oryxos.tool.sandbox.ActionType;
 import io.oryxos.tool.sandbox.Sandbox;
 import io.oryxos.tool.sandbox.SandboxAction;
@@ -82,16 +83,31 @@ public class HttpTools {
    * 跳内网"的绕过。返回最终响应体（{@code type} 为 String 或 byte[]）。
    */
   private <T> T read(String url, Class<T> type) {
+    return read(url, null, type);
+  }
+
+  /**
+   * 同 {@link #read(String, Class)}，并可带自定义请求头（供 {@code http_request} GET 使用）。跨源重定向剥离敏感头，对齐 {@link
+   * #write}。
+   */
+  private <T> T read(String url, String headers, Class<T> type) {
     String current = url;
+    String hopHeaders = headers;
     for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
       sandbox.enforce(new SandboxAction(ActionType.HTTP_READ, current)); // 每跳校验
-      ResponseEntity<T> resp = hopClient.get().uri(current).retrieve().toEntity(type);
+      RestClient.RequestBodySpec spec = hopClient.method(HttpMethod.GET).uri(current);
+      applyCustomHeaders(spec, hopHeaders);
+      ResponseEntity<T> resp = spec.retrieve().toEntity(type);
       if (resp.getStatusCode().is3xxRedirection()) {
         String location = resp.getHeaders().getFirst("Location");
         if (location == null || location.isBlank()) {
           return resp.getBody(); // 3xx 但无 Location：返回现有响应体
         }
-        current = URI.create(current).resolve(location).toString();
+        String next = URI.create(current).resolve(location).toString();
+        if (!sameOrigin(current, next)) {
+          hopHeaders = stripSensitiveHeaders(hopHeaders);
+        }
+        current = next;
         continue;
       }
       return resp.getBody();
@@ -193,7 +209,10 @@ public class HttpTools {
     return -1;
   }
 
-  /** 去掉跨源重定向不应转发的头（Authorization / Proxy-Authorization / Cookie / Cookie2）。 同浏览器对跨站重定向的凭证剥离习惯。 */
+  /**
+   * 去掉跨源重定向不应转发的头（Authorization / Proxy-Authorization / Cookie / Cookie2 / X-API-Key）。
+   * 同浏览器对跨站重定向的凭证剥离习惯。
+   */
   static String stripSensitiveHeaders(String headers) {
     if (headers == null || headers.isBlank()) {
       return headers;
@@ -219,13 +238,14 @@ public class HttpTools {
   @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
       value = "IMPROPER_UNICODE",
       justification =
-          "HTTP header names are ASCII tokens; Locale.ROOT lowercasing is the correct case-fold for Authorization/Cookie matching.")
+          "HTTP header names are ASCII tokens; Locale.ROOT lowercasing is the correct case-fold for Authorization/Cookie/X-API-Key matching.")
   private static boolean isSensitiveHeaderName(String name) {
     String n = name.toLowerCase(Locale.ROOT);
     return "authorization".equals(n)
         || "proxy-authorization".equals(n)
         || "cookie".equals(n)
-        || "cookie2".equals(n);
+        || "cookie2".equals(n)
+        || "x-api-key".equals(n);
   }
 
   @Tool(name = "http_get", description = "发起一个 HTTP GET 请求，返回响应体")
@@ -255,7 +275,7 @@ public class HttpTools {
     HttpMethod httpMethod = HttpMethod.valueOf(verb.toUpperCase(Locale.ROOT));
     // 按方法分级：GET 走读路径（放行 + 内网黑名单 + 逐跳重定向重校验），其余写方法走域名白名单 + 逐跳重定向重校验
     if (HttpMethod.GET.equals(httpMethod)) {
-      return read(url, String.class);
+      return read(url, headers, String.class);
     }
     return write(httpMethod, url, headers, body, false);
   }
@@ -270,6 +290,7 @@ public class HttpTools {
   public String downloadFile(
       @ToolParam(description = "要下载的 URL") String url,
       @ToolParam(description = "保存到的本地文件路径") String path) {
+    MemoryMdGuard.rejectMutation(path);
     sandbox.enforce(new SandboxAction(ActionType.FILE_WRITE, path)); // 先校验落盘路径
     byte[] data = read(url, byte[].class); // 读远端：放行 + 内网黑名单 + 逐跳重定向重校验
     byte[] bytes = data == null ? new byte[0] : data;

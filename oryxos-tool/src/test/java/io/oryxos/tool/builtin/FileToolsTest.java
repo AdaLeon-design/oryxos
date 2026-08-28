@@ -181,6 +181,42 @@ class FileToolsTest {
   }
 
   @Test
+  @DisplayName("文件工具拒绝直接改写 MEMORY.md（须走 save_memory）")
+  void fileToolsRejectDirectMemoryMdMutation() throws IOException {
+    Path memory = dir.resolve("agents/demo/MEMORY.md");
+    Files.createDirectories(memory.getParent());
+    Files.writeString(memory, "## 核心记忆\n- keep\n## 归档记忆\n");
+    String path = memory.toString();
+    Path other = dir.resolve("other.txt");
+    Files.writeString(other, "x");
+
+    assertThrows(IllegalArgumentException.class, () -> tools.writeFile(path, "hijack"));
+    assertThrows(IllegalArgumentException.class, () -> tools.editFile(path, "keep", "hijack"));
+    assertThrows(IllegalArgumentException.class, () -> tools.appendFile(path, "hijack\n"));
+    assertThrows(IllegalArgumentException.class, () -> tools.deleteFile(path));
+    assertThrows(IllegalArgumentException.class, () -> tools.makeDir(path));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.moveFile(path, dir.resolve("x.md").toString()));
+    assertThrows(IllegalArgumentException.class, () -> tools.copyFile(other.toString(), path));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.writeFile(dir.resolve("memory.md").toString(), "case"));
+    assertEquals("## 核心记忆\n- keep\n## 归档记忆\n", Files.readString(memory), "拒绝后内容不得变");
+  }
+
+  @Test
+  @DisplayName("文件工具拒绝经 MEMORY.md 子路径建目录（防 DoS save_memory）")
+  void fileToolsRejectMemoryMdAncestorPath() throws IOException {
+    Path agentDir = dir.resolve("agents/fresh");
+    Files.createDirectories(agentDir);
+    Path underMemory = agentDir.resolve("MEMORY.md/child.txt");
+
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.writeFile(underMemory.toString(), "hijack"));
+    assertTrue(Files.notExists(agentDir.resolve("MEMORY.md")), "拒绝后不得把 MEMORY.md 建成目录");
+  }
+
+  @Test
   @DisplayName("write_file 落盘前复检 FILE_WRITE（防校验窗口内路径逃逸）")
   void writeFileRechecksPathBeforeWrite() {
     AtomicInteger fileWrites = new AtomicInteger();
@@ -197,6 +233,28 @@ class FileToolsTest {
         SandboxViolationException.class, () -> guarded.writeFile(target.toString(), "secret"));
     assertEquals(2, fileWrites.get(), "应在写前后各 enforce 一次 FILE_WRITE");
     assertTrue(Files.notExists(target), "复检拒绝后不得落盘");
+  }
+
+  @Test
+  @DisplayName("make_dir 建目录后复检 FILE_WRITE（防校验窗口内路径逃逸）")
+  void makeDirRechecksPathAfterCreateDirectories() {
+    AtomicInteger fileWrites = new AtomicInteger();
+    Path nested = dir.resolve("nested");
+    Sandbox sandbox =
+        action -> {
+          if (action.type() == ActionType.FILE_WRITE) {
+            int n = fileWrites.incrementAndGet();
+            if (n >= 2) {
+              // 复检必须在 createDirectories 之后：此时目标目录应已存在
+              assertTrue(Files.isDirectory(nested), "复检应发生在 createDirectories 之后");
+              throw new SandboxViolationException("复检拒绝: " + action.target());
+            }
+          }
+        };
+    FileTools guarded = new FileTools(sandbox);
+
+    assertThrows(SandboxViolationException.class, () -> guarded.makeDir(nested.toString()));
+    assertEquals(2, fileWrites.get(), "应在建目录前与 createDirectories 后各 enforce 一次 FILE_WRITE");
   }
 
   @Test
