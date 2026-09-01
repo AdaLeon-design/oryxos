@@ -24,6 +24,10 @@ public class AgentExecutionService {
 
   private static final Logger LOG = LoggerFactory.getLogger(AgentExecutionService.class);
 
+  private static final String STATUS_SUCCESS = "SUCCESS";
+  private static final String STATUS_FAILED = "FAILED";
+  private static final String STATUS_CANCELLED = "CANCELLED";
+
   private final AgentExecutionStore store;
   private final ExecutorService executor;
   private final Clock clock;
@@ -109,14 +113,14 @@ public class AgentExecutionService {
           false,
           AgentStopReasons.MESSAGE_PROCESS_RESTARTED,
           now,
-          "FAILED",
+          STATUS_FAILED,
           AgentStopReasons.PROCESS_RESTARTED)) {
         publish(
             row.id(),
             AgentRunEventTypes.RUN_FAILED,
             Map.of(
                 "status",
-                "FAILED",
+                STATUS_FAILED,
                 "error",
                 AgentStopReasons.MESSAGE_PROCESS_RESTARTED,
                 "stopReason",
@@ -211,11 +215,11 @@ public class AgentExecutionService {
   private void finishSuccess(long id, String sessionId) {
     Instant ended = clock.instant();
     AgentRunExecutionContext.clearCancel(id);
-    if (store.tryFinish(id, sessionId, true, null, ended, "SUCCESS", null)) {
+    if (store.tryFinish(id, sessionId, true, null, ended, STATUS_SUCCESS, null)) {
       publish(
           id,
           AgentRunEventTypes.RUN_FINISHED,
-          Map.of("status", "SUCCESS", "durationMs", durationOf(id, ended)));
+          Map.of("status", STATUS_SUCCESS, "durationMs", durationOf(id, ended)));
     }
   }
 
@@ -226,11 +230,11 @@ public class AgentExecutionService {
         AgentStopReasons.MAX_ITERATIONS.equals(stopReason)
             ? AgentStopReasons.MESSAGE_MAX_ITERATIONS
             : AgentRunEventPayloads.summarizeText(error);
-    if (!store.tryFinish(id, sessionId, false, message, ended, "FAILED", stopReason)) {
+    if (!store.tryFinish(id, sessionId, false, message, ended, STATUS_FAILED, stopReason)) {
       return;
     }
     java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
-    payload.put("status", "FAILED");
+    payload.put("status", STATUS_FAILED);
     payload.put("error", message);
     payload.put("durationMs", durationOf(id, ended));
     if (stopReason != null) {
@@ -248,7 +252,7 @@ public class AgentExecutionService {
         false,
         AgentStopReasons.MESSAGE_NO_ACTIVE_WORKER,
         ended,
-        "CANCELLED",
+        STATUS_CANCELLED,
         stopReason)) {
       return;
     }
