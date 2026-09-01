@@ -311,10 +311,13 @@ class AgentExecutionServiceTest {
                 });
 
     assertTrue(attached.await(2, TimeUnit.SECONDS));
-    AgentExecution cancelling = svc.cancel(id);
+    AgentExecution accepted = svc.cancel(id);
     worker.join(2_000);
 
-    assertEquals("CANCELLING", cancelling.status());
+    // interrupt 后 worker 可能在 cancel() 返回前已收口，立即返回值允许 CANCELLING 或 CANCELLED
+    assertTrue(
+        "CANCELLING".equals(accepted.status()) || "CANCELLED".equals(accepted.status()),
+        () -> "取消请求应被接受，实际状态=" + accepted.status());
     assertTrue(interrupted.get());
     AgentExecution terminal = store.findById(id).orElseThrow();
     assertEquals("CANCELLED", terminal.status());

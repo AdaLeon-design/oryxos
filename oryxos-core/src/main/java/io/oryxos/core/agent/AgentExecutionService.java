@@ -85,12 +85,14 @@ public class AgentExecutionService {
     }
     AgentRunExecutionContext.requestCancel(id);
     publish(id, AgentRunEventTypes.RUN_CANCELLING, Map.of("requestedAt", now.toString()));
+    AgentExecution accepted = store.findById(id).orElse(current);
     Thread worker = runningThreads.get(id);
     if (worker != null) {
       worker.interrupt();
-    } else {
-      finishCancelled(id, current.sessionId(), AgentStopReasons.NO_ACTIVE_WORKER);
+      // 先返回 CANCELLING 快照：worker 可能在 interrupt 后立刻收口为 CANCELLED
+      return accepted;
     }
+    finishCancelled(id, current.sessionId(), AgentStopReasons.NO_ACTIVE_WORKER);
     return store.findById(id).orElse(current);
   }
 

@@ -65,6 +65,7 @@ const RUNTIME_NAV = [
   { key: 'tools', label: 'Tool 列表', path: '/api/v1/tools' },
   { key: 'notify-channels', label: 'Notify 渠道' },
   { key: 'whitelist', label: 'SandBox 列表' },
+  { key: 'tool-policy', label: '工具策略' },
 ]
 
 const NAV = [...TOP_NAV, ...RUNTIME_NAV]
@@ -153,7 +154,7 @@ const overviewCards = computed(() => [
 const overview = {
   tagline: '装在你自己基础设施上的分布式 AI Agent 操作系统 —— 统一底座运行多个业务 Agent',
   status: '运行中',
-  version: 'v0.1.3 · RELEASE',
+  version: 'v0.1.4 · RELEASE',
   capabilities: [
     { name: '对接 LLM', desc: '显式 Provider 映射，多家协议统一' },
     { name: 'ReAct 循环', desc: '自实现推理–行动循环，完全可控' },
@@ -200,6 +201,7 @@ function select(key, options = {}) {
   if (key === 'notify-channels') { cancelNc(); loadNotifyChannels() }
   if (key === 'providers') { cancelPv(); loadProviders() }
   if (key === 'whitelist') { cancelWl(); loadWhitelist() }
+  if (key === 'tool-policy') { cancelTp(); loadToolPolicy() }
   if (key === 'mcp') { cancelMcp(); loadMcp(); loadMcpCatalog() }
   if (key === 'skills') { cancelSkill(); closeSkillDetail(); loadSkills() }
   if (key === 'knowledge') { cancelKb(); closeKbDetail(); loadKnowledge() }
@@ -804,7 +806,7 @@ async function deleteAgent(name) {
   } catch (e) { agents.value = { ...agents.value, error: e.message } }
 }
 
-// —— Notify 渠道管理（CRUD /api/v1/notify-channels）：命名的通知出口，type ∈ feishu/wecom/dingtalk/webhook ——
+// —— Notify 渠道管理（CRUD /api/v1/notify-channels）：命名的通知出口，type ∈ feishu/wecom/dingtalk/webhook/email ——
 const notifyChannels = ref({ loading: false, error: null, data: [] })
 async function loadNotifyChannels() {
   notifyChannels.value = { loading: true, error: null, data: [] }
@@ -819,7 +821,7 @@ async function loadNotifyChannels() {
 }
 
 // 新建/编辑表单：editing 存被编辑渠道的 name（此时 name 只读），null 表示新建
-const nc = reactive({ open: false, editing: null, name: '', type: 'feishu', url: '', description: '', busy: false, error: null })
+const nc = reactive({ open: false, editing: null, name: '', type: 'feishu', url: '', description: '', host: '', port: '', from: '', to: '', username: '', password: '', subject: '', encryption: '', busy: false, error: null })
 
 async function saveNotifyChannel() {
   nc.busy = true; nc.error = null
@@ -827,9 +829,11 @@ async function saveNotifyChannel() {
     const url = nc.editing
       ? `/api/v1/notify-channels/${encodeURIComponent(nc.editing)}`
       : '/api/v1/notify-channels'
-    const payload = nc.editing
-      ? { type: nc.type, url: nc.url, description: nc.description }
-      : { name: nc.name, type: nc.type, url: nc.url, description: nc.description }
+    const config = nc.type === 'email' ? buildEmailConfig() : undefined
+    let payload = nc.type === 'email'
+      ? { type: nc.type, url: '', config, description: nc.description }
+      : { type: nc.type, url: nc.url, description: nc.description }
+    if (!nc.editing) payload = { name: nc.name, ...payload }
     const res = await fetch(url, {
       method: nc.editing ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -847,12 +851,25 @@ function editNotifyChannel(row) {
   nc.type = row.type || 'feishu'
   nc.url = row.url || ''
   nc.description = row.description || ''
+  const c = row.config || {}
+  nc.host = c.host || ''; nc.port = c.port || ''; nc.from = c.from || ''; nc.to = c.to || ''
+  nc.username = c.username || ''; nc.password = c.password || ''; nc.subject = c.subject || ''; nc.encryption = c.encryption || ''
   nc.error = null
   nc.open = true
 }
 
+function buildEmailConfig() {
+  const config = {}
+  for (const k of ['host', 'port', 'from', 'to', 'username', 'password', 'subject', 'encryption']) {
+    if (nc[k]) config[k] = nc[k]
+  }
+  return config
+}
+
 function cancelNc() {
-  nc.open = false; nc.editing = null; nc.name = ''; nc.type = 'feishu'; nc.url = ''; nc.description = ''; nc.error = null
+  nc.open = false; nc.editing = null; nc.name = ''; nc.type = 'feishu'; nc.url = ''; nc.description = ''
+  nc.host = ''; nc.port = ''; nc.from = ''; nc.to = ''; nc.username = ''; nc.password = ''; nc.subject = ''; nc.encryption = ''
+  nc.error = null
 }
 
 async function deleteNotifyChannel(name) {
@@ -1144,27 +1161,28 @@ async function submitEnable() {
   } catch (e) { mcpEnable.error = e.message } finally { mcpEnable.busy = false }
 }
 
-// —— Sandbox 白名单管理（CRUD /api/v1/sandbox/whitelist）：三类 file/shell/http 的白名单条目 ——
+// —— Sandbox 白名单管理（CRUD /api/v1/sandbox/whitelist）：四类 file/shell/http/smtp 的白名单条目 ——
 const WL_CATS = [
   { key: 'file', label: '文件路径', ph: '允许访问的路径，如 /data 或 /tmp/*' },
   { key: 'shell', label: '可执行文件', ph: '允许执行的可执行文件，如 python3（授予本机代码执行权限）' },
   { key: 'http', label: 'HTTP 域名', ph: '允许访问的域名，如 *.example.com' },
+  { key: 'smtp', label: 'SMTP 端点', ph: '允许发信的邮件服务器，如 mail.example.com:25' },
 ]
-const wl = ref({ loading: false, error: null, file: [], shell: [], http: [] })
+const wl = ref({ loading: false, error: null, file: [], shell: [], http: [], smtp: [] })
 async function loadWhitelist() {
-  wl.value = { loading: true, error: null, file: [], shell: [], http: [] }
+  wl.value = { loading: true, error: null, file: [], shell: [], http: [], smtp: [] }
   try {
     const res = await fetch('/api/v1/sandbox/whitelist')
     const body = await res.json()
     if (body.code !== 0) throw new Error(body.message || '加载失败')
     const d = body.data || {}
-    wl.value = { loading: false, error: null, file: d.file || [], shell: d.shell || [], http: d.http || [] }
+    wl.value = { loading: false, error: null, file: d.file || [], shell: d.shell || [], http: d.http || [], smtp: d.smtp || [] }
   } catch (e) {
-    wl.value = { loading: false, error: e.message, file: [], shell: [], http: [] }
+    wl.value = { loading: false, error: e.message, file: [], shell: [], http: [], smtp: [] }
   }
 }
 
-// 新增白名单表单：category ∈ file/shell/http，value 为一条白名单条目
+// 新增白名单表单：category ∈ file/shell/http/smtp，value 为一条白名单条目
 const wlForm = reactive({ open: false, category: 'file', value: '', busy: false, error: null })
 const wlPlaceholder = computed(() => WL_CATS.find((c) => c.key === wlForm.category)?.ph || '')
 
@@ -1191,6 +1209,59 @@ async function deleteWhitelist(category, value) {
     if (body.code !== 0) throw new Error(body.message || '删除失败')
     await loadWhitelist()
   } catch (e) { wl.value = { ...wl.value, error: e.message } }
+}
+
+// —— 工具策略管理（020：CRUD /api/v1/tool-policy）：全局 deny / Agent 例外 / Agent 收紧 + 每 Agent 有效工具集 ——
+const TP_TYPES = [
+  { key: 'GLOBAL_DENY', label: '全局禁用', needAgent: false },
+  { key: 'AGENT_EXEMPT', label: 'Agent 例外（豁免全局禁用）', needAgent: true },
+  { key: 'AGENT_DENY', label: 'Agent 定向禁用', needAgent: true },
+]
+const tp = ref({ loading: false, error: null, rules: [], effective: [], denied: [] })
+async function loadToolPolicy() {
+  tp.value = { loading: true, error: null, rules: [], effective: [], denied: [] }
+  try {
+    const res = await fetch('/api/v1/tool-policy')
+    const body = await res.json()
+    if (body.code !== 0) throw new Error(body.message || '加载失败')
+    // 策略拒绝的调用记录（审计筛选，FR-006/SC-005）
+    const auditRes = await fetch('/api/v1/audit/tool?blockedBy=policy&limit=50')
+    const auditBody = await auditRes.json()
+    tp.value = {
+      loading: false, error: null,
+      rules: body.data.rules || [], effective: body.data.effective || [],
+      denied: auditBody.code === 0 ? (auditBody.data || []) : [],
+    }
+  } catch (e) {
+    tp.value = { loading: false, error: e.message, rules: [], effective: [], denied: [] }
+  }
+}
+const tpForm = reactive({ open: false, ruleType: 'GLOBAL_DENY', agentName: '', pattern: '', busy: false, error: null })
+const tpNeedAgent = computed(() => TP_TYPES.find((t) => t.key === tpForm.ruleType)?.needAgent)
+function tpTypeLabel(type) { return TP_TYPES.find((t) => t.key === type)?.label || type }
+async function addToolPolicyRule() {
+  tpForm.busy = true; tpForm.error = null
+  try {
+    const payload = { ruleType: tpForm.ruleType, pattern: tpForm.pattern }
+    if (tpNeedAgent.value) payload.agentName = tpForm.agentName
+    const res = await fetch('/api/v1/tool-policy/rules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const body = await res.json()
+    if (body.code !== 0) throw new Error(body.message || '新增失败')
+    cancelTp(); await loadToolPolicy()
+  } catch (e) { tpForm.error = e.message } finally { tpForm.busy = false }
+}
+function cancelTp() { tpForm.open = false; tpForm.ruleType = 'GLOBAL_DENY'; tpForm.agentName = ''; tpForm.pattern = ''; tpForm.error = null }
+async function deleteToolPolicyRule(rule) {
+  if (!confirm(`删除策略规则「${tpTypeLabel(rule.ruleType)} ${rule.pattern}」？删除即刻生效。`)) return
+  try {
+    const res = await fetch(`/api/v1/tool-policy/rules/${rule.id}`, { method: 'DELETE' })
+    const body = await res.json()
+    if (body.code !== 0) throw new Error(body.message || '删除失败')
+    await loadToolPolicy()
+  } catch (e) { tp.value = { ...tp.value, error: e.message } }
 }
 
 // —— Agent 详情：Tab 切换（基本信息 / 文件 / 会话 / 记忆）——
@@ -2157,7 +2228,7 @@ const outputRows = computed(() =>
             </div>
           </div>
 
-          <!-- Sandbox 白名单：三类 file/shell/http 的 CRUD（新增走弹框 / 逐行删除） -->
+          <!-- Sandbox 白名单：四类 file/shell/http/smtp 的 CRUD（新增走弹框 / 逐行删除） -->
           <div v-else-if="active === 'whitelist'">
             <div class="toolbar">
               <button class="btn btn-primary" @click="wlForm.open = true">+ 新增白名单</button>
@@ -2171,9 +2242,10 @@ const outputRows = computed(() =>
                     <option value="file">文件路径</option>
                     <option value="shell">Shell 命令</option>
                     <option value="http">HTTP 域名</option>
+                    <option value="smtp">SMTP 端点</option>
                   </select>
                   <input v-model="wlForm.value" class="gen-input" :placeholder="wlPlaceholder" />
-                  <p class="empty">选择类别并填写一条白名单条目：文件路径 / 可执行文件 / HTTP 域名（支持通配，如 *.example.com）。</p>
+                  <p class="empty">选择类别并填写一条白名单条目：文件路径 / 可执行文件 / HTTP 域名 / SMTP 端点（域名支持通配，如 *.example.com）。</p>
                   <p v-if="wlForm.error" class="error">{{ wlForm.error }}</p>
                 </div>
                 <div class="modal-foot">
@@ -2198,6 +2270,80 @@ const outputRows = computed(() =>
                   </tbody>
                 </table>
               </div>
+            </template>
+          </div>
+
+          <!-- 020：工具策略 —— 规则 CRUD + 每 Agent 有效工具集（含被移除原因）+ 策略拒绝记录 -->
+          <div v-else-if="active === 'tool-policy'">
+            <div class="toolbar">
+              <button class="btn btn-primary" @click="tpForm.open = true">+ 新增策略规则</button>
+            </div>
+            <div v-if="tpForm.open" class="modal-overlay" @click.self="cancelTp()">
+              <div class="modal-card">
+                <div class="modal-head"><h3>新增策略规则</h3><button class="modal-x" @click="cancelTp()">✕</button></div>
+                <div class="modal-body">
+                  <select v-model="tpForm.ruleType" class="gen-input">
+                    <option v-for="t in TP_TYPES" :key="t.key" :value="t.key">{{ t.label }}</option>
+                  </select>
+                  <input v-if="tpNeedAgent" v-model="tpForm.agentName" class="gen-input" placeholder="Agent 名（如 ops-agent）" />
+                  <input v-model="tpForm.pattern" class="gen-input" placeholder="工具名（如 shell）或 MCP 通配（如 github-mcp:*）" />
+                  <p class="empty">策略只做减法：例外仅解除全局禁用，不能授予 Agent 未声明的工具；变更即刻生效（热更新）。</p>
+                  <p v-if="tpForm.error" class="error">{{ tpForm.error }}</p>
+                </div>
+                <div class="modal-foot">
+                  <button class="btn" @click="cancelTp">取消</button>
+                  <button class="btn btn-primary" :disabled="tpForm.busy || !tpForm.pattern.trim() || (tpNeedAgent && !tpForm.agentName.trim())" @click="addToolPolicyRule">新增</button>
+                </div>
+              </div>
+            </div>
+            <p v-if="tp.loading" class="empty">加载中…</p>
+            <p v-else-if="tp.error" class="error">出错：{{ tp.error }}</p>
+            <template v-else>
+              <h3 class="sec" style="margin-top:20px">策略规则</h3>
+              <table>
+                <thead><tr><th>类型</th><th>Agent</th><th>pattern</th><th>来源</th><th>时间</th><th style="width:90px">操作</th></tr></thead>
+                <tbody>
+                  <tr v-if="!tp.rules.length"><td colspan="6" class="empty">（暂无策略规则——零策略时一切行为与现状一致）</td></tr>
+                  <tr v-for="r in tp.rules" :key="r.id">
+                    <td>{{ tpTypeLabel(r.ruleType) }}</td>
+                    <td class="mono">{{ r.agentName || '（全部）' }}</td>
+                    <td class="mono">{{ r.pattern }}<span v-if="r.unknownTarget" class="error" title="未注册的工具名，可能拼写有误"> ⚠</span></td>
+                    <td class="mono">{{ r.createdBy || '-' }}</td>
+                    <td class="mono">{{ r.createdAt ? String(r.createdAt).slice(0, 19) : '-' }}</td>
+                    <td class="ops"><button class="btn" @click="deleteToolPolicyRule(r)">删除</button></td>
+                  </tr>
+                </tbody>
+              </table>
+              <h3 class="sec" style="margin-top:20px">各 Agent 有效工具集</h3>
+              <table>
+                <thead><tr><th>Agent</th><th>声明</th><th>有效</th><th>被策略移除（原因）</th></tr></thead>
+                <tbody>
+                  <tr v-if="!tp.effective.length"><td colspan="4" class="empty">（暂无 Agent）</td></tr>
+                  <tr v-for="e in tp.effective" :key="e.agentName">
+                    <td class="mono">{{ e.agentName }}</td>
+                    <td class="mono">{{ e.declared.join(', ') || '（无）' }}</td>
+                    <td class="mono">{{ e.effective.join(', ') || '（全空——将以纯对话运行）' }}</td>
+                    <td class="mono">
+                      <template v-if="e.removed.length">
+                        <div v-for="rm in e.removed" :key="rm.toolName">{{ rm.toolName }} — {{ rm.reason }}</div>
+                      </template>
+                      <span v-else class="empty">（无）</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <h3 class="sec" style="margin-top:20px">策略拒绝记录（最近 50 条）</h3>
+              <table>
+                <thead><tr><th>Agent</th><th>工具</th><th>时间</th></tr></thead>
+                <tbody>
+                  <tr v-if="!tp.denied.length"><td colspan="3" class="empty">（暂无策略拒绝的调用）</td></tr>
+                  <tr v-for="d in tp.denied" :key="d.id">
+                    <td class="mono">{{ d.profileName || '-' }}</td>
+                    <td class="mono">{{ d.toolName }}</td>
+                    <td class="mono">{{ d.createdAt ? String(d.createdAt).slice(0, 19) : '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
             </template>
           </div>
 
@@ -2617,15 +2763,31 @@ const outputRows = computed(() =>
                     <option value="wecom">wecom</option>
                     <option value="dingtalk">dingtalk</option>
                     <option value="webhook">webhook</option>
+                    <option value="email">email</option>
                   </select>
-                  <input v-model="nc.url" class="gen-input" placeholder="Webhook URL" />
+                  <input v-if="nc.type !== 'email'" v-model="nc.url" class="gen-input" placeholder="Webhook URL" />
+                  <template v-if="nc.type === 'email'">
+                    <input v-model="nc.host" class="gen-input" placeholder="SMTP host（如 smtp.example.com）" />
+                    <input v-model="nc.port" class="gen-input" placeholder="端口（465/587/25）" />
+                    <input v-model="nc.from" class="gen-input" placeholder="发件人（from）" />
+                    <input v-model="nc.to" class="gen-input" placeholder="收件人（to，逗号分隔）" />
+                    <input v-model="nc.username" class="gen-input" placeholder="用户名（可选）" />
+                    <input v-model="nc.password" class="gen-input" type="password" placeholder="密码（建议填 ${SMTP_PASSWORD}，无认证留空）" />
+                    <input v-model="nc.subject" class="gen-input" placeholder="主题（可选）" />
+                    <select v-model="nc.encryption" class="gen-input">
+                      <option value="">加密方式（自动按端口推断）</option>
+                      <option value="ssl">ssl</option>
+                      <option value="starttls">starttls</option>
+                      <option value="none">none</option>
+                    </select>
+                  </template>
                   <input v-model="nc.description" class="gen-input" placeholder="描述（可选）" />
-                  <p class="empty">{{ nc.editing ? '编辑现有渠道，渠道名不可改。' : 'type 支持 feishu / wecom / dingtalk / webhook；URL 为对应的 Webhook 地址。' }}</p>
+                  <p class="empty">{{ nc.editing ? '编辑现有渠道，渠道名不可改。' : 'type 支持 feishu / wecom / dingtalk / webhook / email；email 填 SMTP 多字段（密码建议 ${SMTP_PASSWORD} 环境变量占位），其余填 Webhook URL。' }}</p>
                   <p v-if="nc.error" class="error">{{ nc.error }}</p>
                 </div>
                 <div class="modal-foot">
                   <button class="btn" @click="cancelNc">取消</button>
-                  <button class="btn btn-primary" :disabled="nc.busy || !nc.name || !nc.url" @click="saveNotifyChannel">{{ nc.editing ? '保存修改' : '创建' }}</button>
+                  <button class="btn btn-primary" :disabled="nc.busy || !nc.name || (nc.type === 'email' ? !(nc.host && nc.port && nc.from && nc.to) : !nc.url)" @click="saveNotifyChannel">{{ nc.editing ? '保存修改' : '创建' }}</button>
                 </div>
               </div>
             </div>
@@ -2638,7 +2800,7 @@ const outputRows = computed(() =>
                 <tr v-for="c in notifyChannels.data" :key="c.name">
                   <td class="mono">{{ c.name }}</td>
                   <td>{{ c.type }}</td>
-                  <td class="mono">{{ c.url }}</td>
+                  <td class="mono">{{ c.type === 'email' ? (c.config ? c.config.host + ':' + c.config.port : '—') : c.url }}</td>
                   <td>{{ c.description || '—' }}</td>
                   <td class="ops">
                     <button class="btn" @click="editNotifyChannel(c)">编辑</button>

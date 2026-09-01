@@ -181,6 +181,51 @@ class FileToolsTest {
   }
 
   @Test
+  @DisplayName("文件工具拒绝 Skill/Knowledge 内容写与 AGENT.md 直写")
+  void fileToolsRejectSkillKnowledgeAndAgentMd() throws IOException {
+    Path other = dir.resolve("other.txt");
+    Files.writeString(other, "x");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.writeFile(dir.resolve("skills/report/SKILL.md").toString(), "bad"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.writeFile(dir.resolve("agents/demo/skills/report/SKILL.md").toString(), "bad"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.writeFile(dir.resolve("knowledge/ops/doc.md").toString(), "bad"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.writeFile(dir.resolve("agents/demo/AGENT.md").toString(), "bogus"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.makeDir(dir.resolve("agents/demo/skills/report").toString()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.makeDir(dir.resolve("skills/occupied").toString()));
+    Path skillMd = dir.resolve("skills/report/SKILL.md");
+    Files.createDirectories(skillMd.getParent());
+    Files.writeString(skillMd, "keep\n");
+    assertThrows(IllegalArgumentException.class, () -> tools.deleteFile(skillMd.toString()));
+    assertTrue(Files.exists(skillMd), "共享 Skill 实体不得被 delete_file 删除");
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.moveFile(skillMd.toString(), dir.resolve("other-stolen.md").toString()));
+    assertTrue(Files.exists(skillMd), "共享 Skill 实体不得被 move_file 挪走");
+    Path link = dir.resolve("agents/demo/skills/report");
+    Files.createDirectories(link.getParent());
+    Path body = dir.resolve("skills/report");
+    Files.createDirectories(body);
+    try {
+      Files.createSymbolicLink(link, Path.of("../../../skills/report"));
+    } catch (IOException | UnsupportedOperationException e) {
+      Assumptions.assumeTrue(false, "本机无法创建符号链接，跳过: " + e.getMessage());
+    }
+    assertThrows(IllegalArgumentException.class, () -> tools.deleteFile(link.toString()));
+    assertTrue(Files.exists(link), "绑定叶子不得被 delete_file 拆除");
+  }
+
+  @Test
   @DisplayName("文件工具拒绝直接改写 MEMORY.md（须走 save_memory）")
   void fileToolsRejectDirectMemoryMdMutation() throws IOException {
     Path memory = dir.resolve("agents/demo/MEMORY.md");
@@ -205,6 +250,27 @@ class FileToolsTest {
   }
 
   @Test
+  @DisplayName("文件工具拒绝经软链改写 MEMORY.md（notes.md → MEMORY.md）")
+  void fileToolsRejectSymlinkToMemoryMd() throws IOException {
+    Path memory = dir.resolve("agents/demo/MEMORY.md");
+    Files.createDirectories(memory.getParent());
+    Files.writeString(memory, "## 核心记忆\n- keep\n## 归档记忆\n");
+    Path alias = dir.resolve("agents/demo/notes.md");
+    try {
+      Files.createSymbolicLink(alias, memory.getFileName());
+    } catch (IOException | UnsupportedOperationException e) {
+      Assumptions.assumeTrue(false, "当前环境无法创建软链: " + e.getMessage());
+    }
+
+    assertThrows(IllegalArgumentException.class, () -> tools.writeFile(alias.toString(), "hijack"));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.appendFile(alias.toString(), "hijack\n"));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.editFile(alias.toString(), "keep", "hijack"));
+    assertEquals("## 核心记忆\n- keep\n## 归档记忆\n", Files.readString(memory), "拒绝后内容不得变");
+  }
+
+  @Test
   @DisplayName("文件工具拒绝经 MEMORY.md 子路径建目录（防 DoS save_memory）")
   void fileToolsRejectMemoryMdAncestorPath() throws IOException {
     Path agentDir = dir.resolve("agents/fresh");
@@ -214,6 +280,90 @@ class FileToolsTest {
     assertThrows(
         IllegalArgumentException.class, () -> tools.writeFile(underMemory.toString(), "hijack"));
     assertTrue(Files.notExists(agentDir.resolve("MEMORY.md")), "拒绝后不得把 MEMORY.md 建成目录");
+  }
+
+  @Test
+  @DisplayName("文件工具拒绝直写 channels.yaml / mcp_servers.yaml")
+  void fileToolsRejectAdminConfigFiles() throws IOException {
+    Path channels = dir.resolve("channels.yaml");
+    Path mcp = dir.resolve("mcp_servers.yaml");
+    Path other = dir.resolve("other.txt");
+    Files.writeString(channels, "channels: []\n");
+    Files.writeString(mcp, "servers: []\n");
+    Files.writeString(other, "x");
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.writeFile(channels.toString(), "hijack"));
+    assertThrows(IllegalArgumentException.class, () -> tools.editFile(mcp.toString(), "[]", "x"));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.appendFile(channels.toString(), "x\n"));
+    assertThrows(IllegalArgumentException.class, () -> tools.deleteFile(channels.toString()));
+    assertThrows(IllegalArgumentException.class, () -> tools.makeDir(channels.toString()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> tools.moveFile(channels.toString(), dir.resolve("x.yaml").toString()));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.copyFile(other.toString(), mcp.toString()));
+    assertEquals("channels: []\n", Files.readString(channels));
+    assertEquals("servers: []\n", Files.readString(mcp));
+  }
+
+  @Test
+  @DisplayName("read_file 拒绝读取 channels.yaml / mcp_servers.yaml / oryxos.db 原文")
+  void readFileRejectsReservedFiles() throws IOException {
+    Path channels = dir.resolve("channels.yaml");
+    Path mcp = dir.resolve("mcp_servers.yaml");
+    Path db = dir.resolve("oryxos.db");
+    Path wal = dir.resolve("oryxos.db-wal");
+    Files.writeString(channels, "token: SECRET-CHANNEL\n");
+    Files.writeString(mcp, "KEY: SECRET-MCP\n");
+    Files.writeString(db, "fake sqlite bytes SECRET-DB");
+    Files.writeString(wal, "fake wal bytes SECRET-WAL");
+
+    assertThrows(IllegalArgumentException.class, () -> tools.readFile(channels.toString()));
+    assertThrows(IllegalArgumentException.class, () -> tools.readFile(mcp.toString()));
+    assertThrows(IllegalArgumentException.class, () -> tools.readFile(db.toString()));
+    assertThrows(IllegalArgumentException.class, () -> tools.readFile(wal.toString()));
+  }
+
+  @Test
+  @DisplayName("read_file 拒绝经软链别名读 channels.yaml")
+  void readFileRejectsSymlinkAliasToReserved() throws IOException {
+    Path channels = dir.resolve("channels.yaml");
+    Files.writeString(channels, "token: SECRET-CHANNEL\n");
+    Path alias = dir.resolve("alias.yaml");
+    try {
+      Files.createSymbolicLink(alias, channels.getFileName());
+    } catch (IOException | UnsupportedOperationException e) {
+      Assumptions.assumeTrue(false, "当前环境无法创建软链: " + e.getMessage());
+    }
+
+    assertThrows(IllegalArgumentException.class, () -> tools.readFile(alias.toString()));
+  }
+
+  @Test
+  @DisplayName("copy_file 拒绝把保留文件复制成普通文件（防复制即泄露）")
+  void copyFileRejectsReservedSource() throws IOException {
+    Path channels = dir.resolve("channels.yaml");
+    Files.writeString(channels, "token: SECRET-CHANNEL\n");
+    Path leak = dir.resolve("leak.txt");
+
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.copyFile(channels.toString(), leak.toString()));
+    assertFalse(Files.exists(leak), "拒绝后不得留下泄露副本");
+  }
+
+  @Test
+  @DisplayName("grep 跳过保留文件：凭证内容不进结果，普通文件照常命中并给出跳过提示")
+  void grepSkipsReservedFiles() throws IOException {
+    Files.writeString(dir.resolve("channels.yaml"), "token: SECRET-CHANNEL\n");
+    Files.writeString(dir.resolve("a.txt"), "normal needle line\n");
+
+    String result = tools.grep("SECRET|needle", dir.toString());
+
+    assertTrue(result.contains("a.txt:1:normal needle line"), result);
+    assertFalse(result.contains("SECRET-CHANNEL"), "保留文件内容不得出现在搜索结果: " + result);
+    assertFalse(result.contains("channels.yaml"), "保留文件名不得出现在命中行: " + result);
+    assertTrue(result.contains("已跳过"), "应提示跳过了保留文件: " + result);
   }
 
   @Test

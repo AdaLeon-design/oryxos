@@ -110,12 +110,18 @@ Map<String, ChatModel> providerMap = Map.of(
 
 `tool_invocations` 和 `llm_calls` 两张审计表**核心阶段就必须写入**（不需要查询接口，但写入不能省）。不得以"日志够了"为由跳过落库，可审计是 OryxOS 的核心差异化能力。
 
+> **工具治理层（020）**：沙箱白名单之上另有独立的 Tool Policy 减法层——全局/Agent 级工具 allow/deny
+> （`tool_policy_rules` 表，管理台可编辑热更新）。两者正交：策略管「这个 Agent 能不能用这个工具」，
+> 沙箱管「工具执行时能碰什么资源」，策略放行不豁免沙箱。被策略拒绝的调用照写 `tool_invocations`
+> 且带 `blocked_by='policy'` 标记。
+
 ### 原则六：不使用 Java SecurityManager；软连接必须校验真实路径
 
 `SecurityManager` 在 JDK 17 起废弃、JDK 21 已不可用。Sandbox 通过 `SandboxChecker` 的 Path / Pattern 白名单实现：
 - 文件操作：路径白名单（`file.allowed_paths`）
 - Shell：可执行文件精确白名单（`shell.allowed_commands`）；参数以 argv 直传，不解释 Shell 语法。将解释器列入白名单是管理员对本机代码执行权限的显式授予，不构成隔离
 - HTTP：域名通配符白名单（`http.allowed_domains`）
+- SMTP：端点白名单（`smtp.allowed_endpoints`，按 `host:port` 精确放行，端口缺省=任意，空=deny-all）
 
 文件目标存在时必须用 `toRealPath()` 校验真实路径仍位于白名单根；新建路径校验最近存在父目录的真实路径。Agent Skill 绑定只允许指向 `.oryxos/skills/` 的相对软连接，拒绝绝对链接和越界链接。
 
@@ -151,6 +157,15 @@ OryxOS 启动后在当前目录创建 `.oryxos/` 工作区：
 **`MEMORY.md` vs `USER.md` 区别**：
 - `USER.md`：用户手写的初始设定，OryxOS 只读不写
 - `MEMORY.md`：Agent 通过 `save_memory` Tool 写入的成长记录，OryxOS 读写
+
+### Docker 部署形态（与 bin/start.sh 并行的纯增量）
+
+- 镜像内**不跑 Maven**：jar 平台无关，由构建方原生构建一次，Dockerfile 只 `COPY` 胖 jar 进 JRE 基础镜像——多架构（amd64/arm64）构建因此无需 QEMU 模拟 Maven。
+- `docker/docker-entrypoint.sh` 是 start.sh 的容器等价物，三处刻意不同：`exec` 前台（java 即 PID 1，SIGTERM 直达优雅停机）、首启非交互（从模板生成配置后照常启动，零 key 可 boot）、日志走 stdout（交 `docker logs`）。
+- 全部状态在 `/data` 卷（`config/` + 工作区 + `oryxos.db` + `logs/`）；`ORYXOS_ROOT=/data/.oryxos` 走环境变量原生支持。镜像非 root（uid 1000）+ 内置 healthcheck（`/api/v1/health`）。
+- 流水线：`ci.yml` 的 `docker-build` job 做 PR 门禁（只构建不推送）；`release.yml` 在 tar.gz Release 之后 buildx 推 `ghcr.io/oryx-labs/oryxos:v<版本>` + `:latest` 到 GHCR（需 `packages: write`，已加）。
+- 本地构建：`make docker`（依赖 `make build` 的胖 jar）。改 Dockerfile/entrypoint/.dockerignore 时，`docker-build` 门禁会自动验证。
+- 停机行为（2026-08 实测）：SIGTERM 能被处理，但某第三方渠道客户端（长连接 WS）的 Lifecycle stop 不回调，Spring 等 30s latch 超时后才完成关闭——**总耗时 ~32s，exit 143**。compose 已配 `stop_grace_period: 40s` 兜住；裸 `docker stop`（默认 10s）会 SIGKILL，SQLite WAL 保证数据安全。tar.gz 路径同病：`bin/stop.sh` 等 10s 后 kill -9。根治需修那个 bean 的 stop 回调（或给它配 lifecycleProcessor 超时），属上游依赖问题。
 
 ---
 
@@ -291,7 +306,7 @@ interface OryxTool {
 | `http_post` | `HttpTools` | POST 请求，域名通配符白名单 |
 | `save_memory` | `MemoryTools` | 追加到长期记忆（core/archival 分区显式指定） |
 | `recall_memory` | `MemoryTools` | 检索归档记忆；配置全局 `embedding.*` 后为语义+关键词+时间三路加权融合（015），未配置保持关键词行为 |
-| `notify` | `NotifyTools` | 推送到 Profile 的 `notify_channels`，核心阶段走 `WebhookNotifyAdapter` |
+| `notify` | `NotifyTools` | 推送到全局注册表按名引用的通知渠道；webhook/feishu/wecom/dingtalk 走 `WebhookNotifyAdapter`，email 走 `EmailNotifyAdapter`（`config` 多字段 + SMTP 端点白名单） |
 
 ### Plugin Tool 三档
 

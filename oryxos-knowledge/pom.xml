@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.oryxos</groupId>
         <artifactId>oryxos</artifactId>
-        <version>0.1.3-RELEASE</version>
+        <version>0.1.4-RELEASE</version>
     </parent>
 
     <artifactId>oryxos-knowledge</artifactId>
@@ -42,6 +42,14 @@
             <groupId>com.github.spotbugs</groupId>
             <artifactId>spotbugs-annotations</artifactId>
             <scope>provided</scope>
+        </dependency>
+        <!-- 测试复用 core 的 SymlinkAssumptions 环境探针（软链/POSIX 用例在 Windows 无权限时优雅 skip） -->
+        <dependency>
+            <groupId>io.oryxos</groupId>
+            <artifactId>oryxos-core</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

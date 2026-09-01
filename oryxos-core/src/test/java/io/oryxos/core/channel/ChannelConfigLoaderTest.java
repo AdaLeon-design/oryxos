@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.oryxos.core.testing.SymlinkAssumptions;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -35,6 +36,7 @@ class ChannelConfigLoaderTest {
   @Test
   @DisplayName("loadRaw 保留 ${ENV} 字面量；save 回写后字面量原样落盘且权限收紧 rw-------")
   void rawKeepsPlaceholdersAndSaveRestrictsPermission() throws Exception {
+    SymlinkAssumptions.assumePosixSupported();
     write(
         """
         channels:
@@ -142,5 +144,49 @@ class ChannelConfigLoaderTest {
             enabled: false
         """);
     assertEquals(false, new ChannelConfigLoader(configFile()).loadRaw().get(0).enabled());
+  }
+
+  @Test
+  @DisplayName("YAML 1.1 布尔词 yes/on 不得被 String.valueOf 改成 true（须加引号）")
+  void rejectsYamlBooleanWordsAsStringFields() throws Exception {
+    write(
+        """
+        channels:
+          - name: yes
+            type: feishu
+            app_id: a
+            app_secret: b
+            agent: ops
+        """);
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class, () -> new ChannelConfigLoader(configFile()).loadRaw());
+    assertTrue(e.getMessage().contains("字符串") || e.getMessage().contains("Boolean"));
+
+    write(
+        """
+        channels:
+          - name: ops
+            type: feishu
+            app_id: a
+            app_secret: b
+            agent: on
+        """);
+    assertThrows(
+        IllegalArgumentException.class, () -> new ChannelConfigLoader(configFile()).loadRaw());
+
+    write(
+        """
+        channels:
+          - name: "yes"
+            type: feishu
+            app_id: a
+            app_secret: b
+            agent: "on"
+        """);
+    List<ChannelConfig> ok = new ChannelConfigLoader(configFile()).loadRaw();
+    assertEquals(1, ok.size());
+    assertEquals("yes", ok.get(0).name());
+    assertEquals("on", ok.get(0).agent());
   }
 }

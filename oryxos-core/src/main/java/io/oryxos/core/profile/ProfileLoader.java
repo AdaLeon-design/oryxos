@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,6 +17,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.support.CronTrigger;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -116,13 +118,14 @@ public class ProfileLoader {
         asString(map.get("description")),
         toIdentity(asMap(map.get("identity"))),
         provider,
-        asStringList(map.get("tools")),
-        asStringList(map.get("mcp_servers")),
-        asStringList(map.get("channels")),
-        toNotifyChannels(asList(map.get("notify_channels"))),
-        toSchedules(asList(map.get("schedules")), source),
-        asStringList(map.get("bootstrap")),
-        toSettings(asMap(map.get("settings"))));
+        asStringList(map.get("tools"), "tools", name),
+        asStringList(map.get("mcp_servers"), "mcp_servers", name),
+        asStringList(map.get("channels"), "channels", name),
+        toNotifyChannels(
+            requireListOrNull(map.get("notify_channels"), "notify_channels", name), name),
+        toSchedules(requireListOrNull(map.get("schedules"), "schedules", name), source),
+        asStringList(map.get("bootstrap"), "bootstrap", name),
+        toSettings(asMap(map.get("settings")), name));
   }
 
   private Profile.ProviderRef toProviderRef(Map<String, Object> map, String profileName) {
@@ -147,7 +150,8 @@ public class ProfileLoader {
               + knownProviders
               + "）");
     }
-    return new Profile.ProviderRef(providerName, model, asDouble(map.get("temperature")));
+    return new Profile.ProviderRef(
+        providerName, model, asDouble(map.get("temperature"), "provider.temperature", profileName));
   }
 
   private static Profile.Identity toIdentity(Map<String, Object> map) {
@@ -157,7 +161,8 @@ public class ProfileLoader {
     return new Profile.Identity(asString(map.get("agent_name")), asString(map.get("prompt")));
   }
 
-  private static List<Profile.NotifyChannel> toNotifyChannels(List<Object> list) {
+  private static List<Profile.NotifyChannel> toNotifyChannels(
+      List<Object> list, String profileName) {
     if (list == null) {
       return List.of();
     }
@@ -165,14 +170,19 @@ public class ProfileLoader {
     for (Object item : list) {
       Map<String, Object> entry = asMap(item);
       if (entry == null) {
-        continue;
+        throw new ProfileValidationException(
+            "Profile " + profileName + " 的 notify_channels 存在非对象条目: " + item);
       }
       String type = asString(entry.get("type"));
+      if (type == null || type.isBlank()) {
+        throw new ProfileValidationException(
+            "Profile " + profileName + " 的 notify_channels 缺少 type");
+      }
       // type 之外的键都是渠道特定配置（如 webhook 的 url）
       Map<String, String> config = new LinkedHashMap<>();
       for (Map.Entry<String, Object> kv : entry.entrySet()) {
         if (!"type".equals(kv.getKey()) && kv.getValue() != null) {
-          config.put(kv.getKey(), String.valueOf(kv.getValue()));
+          config.put(kv.getKey(), asString(kv.getValue()));
         }
       }
       channels.add(new Profile.NotifyChannel(type, config));
@@ -189,7 +199,7 @@ public class ProfileLoader {
     for (Object item : list) {
       Map<String, Object> entry = asMap(item);
       if (entry == null) {
-        continue;
+        throw new ProfileValidationException("Profile " + source + " 的 schedules 存在非对象条目: " + item);
       }
       String legacyId = asString(entry.get("id"));
       String configuredKey = asString(entry.get("key"));
@@ -216,25 +226,52 @@ public class ProfileLoader {
       if (!keys.add(key)) {
         throw new ProfileValidationException("Profile 定时配置 key 重复: " + key + " (" + source + ")");
       }
+      String cron = asString(entry.get("cron"));
+      if (cron == null || cron.isBlank()) {
+        throw new ProfileValidationException("Profile 定时配置 " + key + " 缺少 cron: " + source);
+      }
+      String zone = asString(entry.get("zone"));
+      validateCronAndZone(key, cron.strip(), zone, source);
       schedules.add(
           new Profile.ScheduleConfig(
-              key,
-              name,
-              asString(entry.get("cron")),
-              asString(entry.get("zone")),
-              asString(entry.get("message"))));
+              key, name, cron.strip(), zone, asString(entry.get("message"))));
     }
     return schedules;
   }
 
-  private static Profile.Settings toSettings(Map<String, Object> map) {
+  /** 与 {@code AgentScheduler} 同口径：非法 cron / ZoneId 在加载期失败，避免注册时仅 WARN 跳过。 */
+  private static void validateCronAndZone(String key, String cron, String zone, String source) {
+    ZoneId zoneId;
+    try {
+      zoneId = zone == null || zone.isBlank() ? ZoneId.systemDefault() : ZoneId.of(zone);
+    } catch (RuntimeException e) {
+      throw new ProfileValidationException(
+          "Profile 定时配置 " + key + " 的 zone 无效: " + source + " (" + e.getMessage() + ")");
+    }
+    try {
+      new CronTrigger(cron, zoneId);
+    } catch (RuntimeException e) {
+      throw new ProfileValidationException(
+          "Profile 定时配置 " + key + " 的 cron 无效: " + source + " (" + e.getMessage() + ")");
+    }
+  }
+
+  private static Profile.Settings toSettings(Map<String, Object> map, String profileName) {
     if (map == null) {
       return Profile.Settings.defaults();
     }
     Profile.Settings defaults = Profile.Settings.defaults();
     return new Profile.Settings(
-        asInt(map.get("max_iterations"), defaults.maxIterations()),
-        asInt(map.get("max_history_turns"), defaults.maxHistoryTurns()));
+        asInt(
+            map.get("max_iterations"),
+            defaults.maxIterations(),
+            "settings.max_iterations",
+            profileName),
+        asInt(
+            map.get("max_history_turns"),
+            defaults.maxHistoryTurns(),
+            "settings.max_history_turns",
+            profileName));
   }
 
   /** 递归解析 ${ENV} 占位；环境变量缺失时保留原样并 WARN（凭证必填校验属全局层职责）。 */
@@ -285,15 +322,59 @@ public class ProfileLoader {
   }
 
   private static String asString(Object value) {
-    return value == null ? null : String.valueOf(value);
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof String text) {
+      return text;
+    }
+    // YAML 1.1：裸 yes/on/null 会变成 Boolean/null；String.valueOf(true)→"true" 会静默改名（对齐 #198）
+    throw new ProfileValidationException(
+        "期望 YAML 字符串（yes/on/null 等请加引号），实际是 " + value.getClass().getSimpleName() + ": " + value);
   }
 
-  private static Double asDouble(Object value) {
-    return value instanceof Number number ? number.doubleValue() : null;
+  private static Double asDouble(Object value, String field, String profileName) {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof Number number) {
+      return number.doubleValue();
+    }
+    if (value instanceof String text) {
+      if (text.isBlank()) {
+        return null;
+      }
+      try {
+        return Double.parseDouble(text.strip());
+      } catch (NumberFormatException e) {
+        throw new ProfileValidationException(
+            "Profile " + profileName + " 的 " + field + " 必须是数字: " + text);
+      }
+    }
+    throw new ProfileValidationException(
+        "Profile " + profileName + " 的 " + field + " 必须是数字: " + value);
   }
 
-  private static int asInt(Object value, int defaultValue) {
-    return value instanceof Number number ? number.intValue() : defaultValue;
+  private static int asInt(Object value, int defaultValue, String field, String profileName) {
+    if (value == null) {
+      return defaultValue;
+    }
+    if (value instanceof Number number) {
+      return number.intValue();
+    }
+    if (value instanceof String text) {
+      if (text.isBlank()) {
+        return defaultValue;
+      }
+      try {
+        return Integer.parseInt(text.strip());
+      } catch (NumberFormatException e) {
+        throw new ProfileValidationException(
+            "Profile " + profileName + " 的 " + field + " 必须是整数: " + text);
+      }
+    }
+    throw new ProfileValidationException(
+        "Profile " + profileName + " 的 " + field + " 必须是整数: " + value);
   }
 
   @SuppressWarnings("unchecked")
@@ -301,17 +382,29 @@ public class ProfileLoader {
     return value instanceof Map ? (Map<String, Object>) value : null;
   }
 
+  /** 列表字段：缺省（null）→ 空列表语义由调用方处理；显式写成标量/映射则报错，避免「写了却静默变空」。 */
   @SuppressWarnings("unchecked")
-  private static List<Object> asList(Object value) {
-    return value instanceof List ? (List<Object>) value : null;
+  private static List<Object> requireListOrNull(Object value, String field, String profileName) {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof List<?> list) {
+      return (List<Object>) list;
+    }
+    throw new ProfileValidationException(
+        "Profile " + profileName + " 的 " + field + " 必须是列表: " + value);
   }
 
-  private static List<String> asStringList(Object value) {
-    List<Object> list = asList(value);
+  private static List<String> asStringList(Object value, String field, String profileName) {
+    List<Object> list = requireListOrNull(value, field, profileName);
     if (list == null) {
       return List.of();
     }
-    return list.stream().map(String::valueOf).toList();
+    List<String> out = new ArrayList<>();
+    for (Object item : list) {
+      out.add(asString(item));
+    }
+    return out;
   }
 
   /** 日志参数消毒：去掉换行，防日志伪造（CRLF injection）。 */

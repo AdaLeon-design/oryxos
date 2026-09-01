@@ -1,29 +1,32 @@
 package io.oryxos.tool.builtin;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
 
 import com.sun.net.httpserver.HttpServer;
 import io.oryxos.tool.sandbox.ActionType;
 import io.oryxos.tool.sandbox.FileSandboxProperties;
 import io.oryxos.tool.sandbox.HttpSandboxProperties;
 import io.oryxos.tool.sandbox.PermissiveSandbox;
+import io.oryxos.tool.sandbox.ResolvedHttpReadGuard;
 import io.oryxos.tool.sandbox.Sandbox;
+import io.oryxos.tool.sandbox.SandboxAction;
 import io.oryxos.tool.sandbox.SandboxViolationException;
 import io.oryxos.tool.sandbox.ShellSandboxProperties;
 import io.oryxos.tool.sandbox.WhitelistSandbox;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -33,6 +36,29 @@ import org.springframework.web.client.RestClient;
 
 /** 课件《第20节》验收 harness：HttpToolsTest——课件正文两用例即模板。 */
 class HttpToolsTest {
+
+  private static final class TestResolvedSandbox implements Sandbox, ResolvedHttpReadGuard {
+
+    private final Consumer<SandboxAction> enforcer;
+
+    private TestResolvedSandbox(Consumer<SandboxAction> enforcer) {
+      this.enforcer = enforcer;
+    }
+
+    @Override
+    public void enforce(SandboxAction action) {
+      enforcer.accept(action);
+    }
+
+    @Override
+    public InetAddress[] resolveHttpReadHost(String host) {
+      try {
+        return InetAddress.getAllByName(host);
+      } catch (UnknownHostException e) {
+        throw new SandboxViolationException("无法解析主机: " + host);
+      }
+    }
+  }
 
   private HttpServer server;
   private final List<String> receivedBodies = new ArrayList<>();
@@ -110,10 +136,57 @@ class HttpToolsTest {
   }
 
   @Test
+  @DisplayName("只实现旧 Sandbox 契约时仍可使用 HTTP_REQUEST 写路径")
+  void writeOnlyUsageDoesNotRequireResolvedReadGuard() {
+    Sandbox legacy = action -> {};
+    HttpTools writeOnly = new HttpTools(legacy, RestClient.create());
+
+    String result = writeOnly.httpPost(url(), "{\"city\":\"beijing\"}");
+
+    assertTrue(result.contains("晴"));
+  }
+
+  @Test
+  @DisplayName("http_request 拒绝 schema 外方法 TRACE")
+  void httpRequestRejectsTrace() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class, () -> tools.httpRequest("TRACE", url(), null, null));
+
+    assertTrue(ex.getMessage().contains("TRACE"));
+    assertTrue(ex.getMessage().contains("GET/POST/PUT/PATCH/DELETE"));
+    assertEquals(0, receivedBodies.size(), "非法方法不得发出请求");
+  }
+
+  @Test
+  @DisplayName("http_request 拒绝 HEAD/OPTIONS 等 Spring 枚举但文档未列出的方法")
+  void httpRequestRejectsHeadAndOptions() {
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.httpRequest("HEAD", url(), null, null));
+    assertThrows(
+        IllegalArgumentException.class, () -> tools.httpRequest("OPTIONS", url(), null, null));
+    assertEquals(0, receivedBodies.size());
+  }
+
+  @Test
+  @DisplayName("http_request 拒绝未知 method")
+  void httpRequestRejectsUnknownMethod() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class, () -> tools.httpRequest("FOOBAR", url(), null, null));
+
+    assertTrue(ex.getMessage().contains("FOOBAR"));
+    assertEquals(0, receivedBodies.size());
+  }
+
+  @Test
   @DisplayName("http_get_命中白名单外域名应被拦下")
   void httpGetOutsideWhitelistIsBlocked() {
-    Sandbox denying = mock(Sandbox.class);
-    doThrow(new SandboxViolationException("域名不在白名单")).when(denying).enforce(any());
+    Sandbox denying =
+        new TestResolvedSandbox(
+            action -> {
+              throw new SandboxViolationException("域名不在白名单");
+            });
     HttpTools guarded = new HttpTools(denying, RestClient.create());
 
     assertThrows(RuntimeException.class, () -> guarded.httpGet(url())); // 课件断言形态
@@ -245,6 +318,158 @@ class HttpToolsTest {
   }
 
   @Test
+  @DisplayName(
+      "stripSensitiveHeaders 剥离 Private-Token / JOB-TOKEN / X-Auth-Token / X-Access-Token / Deploy-Token，保留非凭证头")
+  void stripSensitiveHeadersDropsVendorApiTokens() {
+    String kept =
+        HttpTools.stripSensitiveHeaders(
+            """
+            Private-Token: glpat-secret
+            JOB-TOKEN: ci-job-secret
+            X-Auth-Token: session-secret
+            X-Access-Token: ghp-secret
+            Deploy-Token: gitlab-deploy-secret
+            X-Trace-Id: keep-me
+            Accept: application/json
+            """);
+
+    assertTrue(kept.contains("X-Trace-Id:keep-me"), kept);
+    assertTrue(kept.contains("Accept:application/json"), kept);
+    assertFalse(kept.toLowerCase().contains("private-token"), kept);
+    assertFalse(kept.toLowerCase().contains("job-token"), kept);
+    assertFalse(kept.toLowerCase().contains("x-auth-token"), kept);
+    assertFalse(kept.toLowerCase().contains("x-access-token"), kept);
+    assertFalse(kept.toLowerCase().contains("deploy-token"), kept);
+  }
+
+  @Test
+  @DisplayName("http_request 跨源 302 不得把 Private-Token 带到下一跳（白名单内主机亦然）")
+  void httpRequestCrossOriginRedirectStripsPrivateToken() throws IOException {
+    HttpServer entry = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    HttpServer sink = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    AtomicInteger sinkHits = new AtomicInteger();
+    List<String> sinkTokens = new ArrayList<>();
+    List<String> sinkTrace = new ArrayList<>();
+    try {
+      sink.createContext(
+          "/",
+          exchange -> {
+            sinkHits.incrementAndGet();
+            String token = exchange.getRequestHeaders().getFirst("Private-Token");
+            if (token != null) {
+              sinkTokens.add(token);
+            }
+            String trace = exchange.getRequestHeaders().getFirst("X-Trace-Id");
+            if (trace != null) {
+              sinkTrace.add(trace);
+            }
+            byte[] response = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+          });
+      String sinkUrl = "http://127.0.0.1:" + sink.getAddress().getPort() + "/sink";
+      entry.createContext(
+          "/",
+          exchange -> {
+            exchange.getResponseHeaders().add("Location", sinkUrl);
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+          });
+      entry.start();
+      sink.start();
+
+      Sandbox whitelist =
+          new WhitelistSandbox(
+              new FileSandboxProperties(List.of()),
+              new ShellSandboxProperties(List.of()),
+              new HttpSandboxProperties(List.of("localhost", "127.0.0.1")));
+      HttpTools guarded = new HttpTools(whitelist, RestClient.create());
+      String start = "http://localhost:" + entry.getAddress().getPort() + "/";
+
+      String body =
+          guarded.httpRequest(
+              "POST", start, "Private-Token: glpat-secret\nX-Trace-Id: keep-me", "{\"x\":1}");
+
+      assertEquals("ok", body);
+      assertEquals(1, sinkHits.get());
+      assertTrue(sinkTokens.isEmpty(), "跨源重定向不得转发 Private-Token");
+      assertEquals(List.of("keep-me"), sinkTrace, "非敏感自定义头仍可转发");
+    } finally {
+      entry.stop(0);
+      sink.stop(0);
+    }
+  }
+
+  @Test
+  @DisplayName("http_request 跨源 302 不得把 X-Access-Token / Deploy-Token 带到下一跳")
+  void httpRequestCrossOriginRedirectStripsXAccessAndDeployToken() throws IOException {
+    HttpServer entry = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    HttpServer sink = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    AtomicInteger sinkHits = new AtomicInteger();
+    List<String> sinkAccess = new ArrayList<>();
+    List<String> sinkDeploy = new ArrayList<>();
+    List<String> sinkTrace = new ArrayList<>();
+    try {
+      sink.createContext(
+          "/",
+          exchange -> {
+            sinkHits.incrementAndGet();
+            String access = exchange.getRequestHeaders().getFirst("X-Access-Token");
+            if (access != null) {
+              sinkAccess.add(access);
+            }
+            String deploy = exchange.getRequestHeaders().getFirst("Deploy-Token");
+            if (deploy != null) {
+              sinkDeploy.add(deploy);
+            }
+            String trace = exchange.getRequestHeaders().getFirst("X-Trace-Id");
+            if (trace != null) {
+              sinkTrace.add(trace);
+            }
+            byte[] response = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+          });
+      String sinkUrl = "http://127.0.0.1:" + sink.getAddress().getPort() + "/sink";
+      entry.createContext(
+          "/",
+          exchange -> {
+            exchange.getResponseHeaders().add("Location", sinkUrl);
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+          });
+      entry.start();
+      sink.start();
+
+      Sandbox whitelist =
+          new WhitelistSandbox(
+              new FileSandboxProperties(List.of()),
+              new ShellSandboxProperties(List.of()),
+              new HttpSandboxProperties(List.of("localhost", "127.0.0.1")));
+      HttpTools guarded = new HttpTools(whitelist, RestClient.create());
+      String start = "http://localhost:" + entry.getAddress().getPort() + "/";
+
+      String body =
+          guarded.httpRequest(
+              "POST",
+              start,
+              "X-Access-Token: ghp-secret\nDeploy-Token: deploy-secret\nX-Trace-Id: keep-me",
+              "{\"x\":1}");
+
+      assertEquals("ok", body);
+      assertEquals(1, sinkHits.get());
+      assertTrue(sinkAccess.isEmpty(), "跨源重定向不得转发 X-Access-Token");
+      assertTrue(sinkDeploy.isEmpty(), "跨源重定向不得转发 Deploy-Token");
+      assertEquals(List.of("keep-me"), sinkTrace, "非敏感自定义头仍可转发");
+    } finally {
+      entry.stop(0);
+      sink.stop(0);
+    }
+  }
+
+  @Test
   @DisplayName("http_request 跨源 302 不得把 X-API-Key 带到下一跳（白名单内主机亦然）")
   void httpRequestCrossOriginRedirectStripsXApiKey() throws IOException {
     HttpServer entry = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -304,12 +529,62 @@ class HttpToolsTest {
   }
 
   @Test
+  @DisplayName("http_request 跨源 302 不得把裸 Api-Key 带到下一跳")
+  void httpRequestCrossOriginRedirectStripsBareApiKey() throws IOException {
+    HttpServer entry = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    HttpServer sink = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    List<String> sinkApiKeys = new ArrayList<>();
+    try {
+      sink.createContext(
+          "/",
+          exchange -> {
+            String apiKey = exchange.getRequestHeaders().getFirst("Api-Key");
+            if (apiKey != null) {
+              sinkApiKeys.add(apiKey);
+            }
+            byte[] response = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+          });
+      String sinkUrl = "http://127.0.0.1:" + sink.getAddress().getPort() + "/sink";
+      entry.createContext(
+          "/",
+          exchange -> {
+            exchange.getResponseHeaders().add("Location", sinkUrl);
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+          });
+      entry.start();
+      sink.start();
+
+      Sandbox whitelist =
+          new WhitelistSandbox(
+              new FileSandboxProperties(List.of()),
+              new ShellSandboxProperties(List.of()),
+              new HttpSandboxProperties(List.of("localhost", "127.0.0.1")));
+      HttpTools guarded = new HttpTools(whitelist, RestClient.create());
+      String start = "http://localhost:" + entry.getAddress().getPort() + "/";
+
+      String body =
+          guarded.httpRequest("POST", start, "Api-Key: bare-secret\nX-Trace-Id: keep-me", "{}");
+
+      assertEquals("ok", body);
+      assertTrue(sinkApiKeys.isEmpty(), "跨源重定向不得转发裸 Api-Key");
+    } finally {
+      entry.stop(0);
+      sink.stop(0);
+    }
+  }
+
+  @Test
   @DisplayName("http_request 跨源 302 不得把 POST body 带到下一跳（改 GET）")
   void httpRequest302DoesNotReplayPostBody() throws IOException {
     HttpServer entry = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     HttpServer sink = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     List<String> sinkMethods = new ArrayList<>();
     List<String> sinkBodies = new ArrayList<>();
+    List<String> sinkContentTypes = new ArrayList<>();
     try {
       sink.createContext(
           "/",
@@ -317,6 +592,7 @@ class HttpToolsTest {
             sinkMethods.add(exchange.getRequestMethod());
             sinkBodies.add(
                 new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            sinkContentTypes.add(exchange.getRequestHeaders().getFirst("Content-Type"));
             byte[] response = "ok".getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(200, response.length);
             exchange.getResponseBody().write(response);
@@ -342,11 +618,14 @@ class HttpToolsTest {
       HttpTools guarded = new HttpTools(whitelist, RestClient.create());
       String start = "http://localhost:" + entry.getAddress().getPort() + "/";
 
-      String body = guarded.httpRequest("POST", start, null, "{\"secret\":\"token\"}");
+      String body =
+          guarded.httpRequest(
+              "POST", start, "Content-Type: application/json", "{\"secret\":\"token\"}");
 
       assertEquals("ok", body);
       assertEquals(List.of("GET"), sinkMethods, "302 下一跳应改为 GET");
       assertEquals(List.of(""), sinkBodies, "302 不得把 POST body 转到下一跳");
+      assertTrue(sinkContentTypes.stream().allMatch(v -> v == null), "302 改 GET 不得转发 Content-Type");
     } finally {
       entry.stop(0);
       sink.stop(0);
@@ -410,16 +689,17 @@ class HttpToolsTest {
     Path nested = dir.resolve("nested");
     Path target = nested.resolve("payload.bin");
     Sandbox sandbox =
-        action -> {
-          if (action.type() == ActionType.FILE_WRITE) {
-            int n = fileWrites.incrementAndGet();
-            if (n >= 2) {
-              // 复检必须在 createDirectories 之后：此时父目录应已存在
-              assertTrue(Files.isDirectory(nested), "写前复检应发生在 createDirectories 之后");
-              throw new SandboxViolationException("复检拒绝: " + action.target());
-            }
-          }
-        };
+        new TestResolvedSandbox(
+            action -> {
+              if (action.type() == ActionType.FILE_WRITE) {
+                int n = fileWrites.incrementAndGet();
+                if (n >= 2) {
+                  // 复检必须在 createDirectories 之后：此时父目录应已存在
+                  assertTrue(Files.isDirectory(nested), "写前复检应发生在 createDirectories 之后");
+                  throw new SandboxViolationException("复检拒绝: " + action.target());
+                }
+              }
+            });
     HttpTools guarded = new HttpTools(sandbox, RestClient.create());
 
     assertThrows(

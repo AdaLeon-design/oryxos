@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.oryxos</groupId>
         <artifactId>oryxos</artifactId>
-        <version>0.1.3-RELEASE</version>
+        <version>0.1.4-RELEASE</version>
     </parent>
 
     <artifactId>oryxos-boot</artifactId>
@@ -42,6 +42,14 @@
         <dependency>
             <groupId>io.oryxos</groupId>
             <artifactId>oryxos-channel-feishu</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.oryxos</groupId>
+            <artifactId>oryxos-channel-wecom</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.oryxos</groupId>
+            <artifactId>oryxos-channel-dingtalk</artifactId>
         </dependency>
         <dependency>
             <groupId>io.oryxos</groupId>

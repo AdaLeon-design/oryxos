@@ -95,6 +95,7 @@ import io.oryxos.tool.interaction.UserInteraction;
 import io.oryxos.tool.mcp.McpClientService;
 import io.oryxos.tool.mcp.McpConfigLoader;
 import io.oryxos.tool.notify.DingTalkNotifyAdapter;
+import io.oryxos.tool.notify.EmailNotifyAdapter;
 import io.oryxos.tool.notify.FeishuNotifyAdapter;
 import io.oryxos.tool.notify.NotifyChannelAdapter;
 import io.oryxos.tool.notify.NotifyPoster;
@@ -104,6 +105,7 @@ import io.oryxos.tool.sandbox.FileSandboxProperties;
 import io.oryxos.tool.sandbox.HttpSandboxProperties;
 import io.oryxos.tool.sandbox.Sandbox;
 import io.oryxos.tool.sandbox.ShellSandboxProperties;
+import io.oryxos.tool.sandbox.SmtpSandboxProperties;
 import io.oryxos.tool.sandbox.WhitelistSandbox;
 import io.oryxos.tool.web.DuckDuckGoSearchProvider;
 import java.net.http.HttpClient;
@@ -146,7 +148,8 @@ import org.springframework.web.context.WebApplicationContext;
   ProvidersProperties.class,
   FileSandboxProperties.class,
   ShellSandboxProperties.class,
-  HttpSandboxProperties.class
+  HttpSandboxProperties.class,
+  SmtpSandboxProperties.class
 })
 public class OryxOsRuntime {
 
@@ -518,7 +521,8 @@ public class OryxOsRuntime {
       SandboxWhitelistStore whitelistStore,
       FileSandboxProperties fileProps,
       ShellSandboxProperties shellProps,
-      HttpSandboxProperties httpProps) {
+      HttpSandboxProperties httpProps,
+      SmtpSandboxProperties smtpProps) {
     // 24 节：真正的白名单校验（宪法 VI 第一档）。空列表 = deny-all。
     // 返回具体类型（而非 Sandbox 接口）：同一实例既是校验墙 Sandbox 又是可管理白名单 SandboxWhitelist，
     // 具体类型让 Spring 同时按两个接口装配（工具注 Sandbox，Web 管理端点注 SandboxWhitelist）。
@@ -529,6 +533,7 @@ public class OryxOsRuntime {
     nullToEmpty(fileProps.allowedPaths()).forEach(p -> whitelist.add(Category.FILE, p));
     nullToEmpty(shellProps.allowedCommands()).forEach(c -> whitelist.add(Category.SHELL, c));
     nullToEmpty(httpProps.allowedDomains()).forEach(d -> whitelist.add(Category.HTTP, d));
+    nullToEmpty(smtpProps.allowedEndpoints()).forEach(e -> whitelist.add(Category.SMTP, e));
     // 工作区根永远是 Agent 的家：随 oryxos.root 自动纳入文件白名单（幂等 + 落库）。
     whitelist.add(Category.FILE, oryxosRootProp);
     return whitelist;
@@ -724,7 +729,8 @@ public class OryxOsRuntime {
             "webhook", new WebhookNotifyAdapter(notifyPoster),
             "wecom", new WeComNotifyAdapter(notifyPoster),
             "feishu", new FeishuNotifyAdapter(notifyPoster),
-            "dingtalk", new DingTalkNotifyAdapter(notifyPoster));
+            "dingtalk", new DingTalkNotifyAdapter(notifyPoster),
+            "email", new EmailNotifyAdapter(sandbox));
     registry.register(new NotifyTools(notifyAdapters, sandbox, notifyChannelRegistry));
     // 记忆工具：save_memory / recall_memory（补齐 20 节预留的两工具面），只认门面对后端无感
     registry.registerAnnotated(new MemoryTools(memoryService));
@@ -754,12 +760,43 @@ public class OryxOsRuntime {
     return toolRegistry.asMap();
   }
 
+  /**
+   * 020-tool-policy：工具策略（平台治理层）。ownerLookup 走 ToolRegistry 活视图——MCP server 增删后 {@code server:*}
+   * 通配即刻按新归属判定。
+   */
+  @Bean
+  io.oryxos.core.policy.ToolPolicyService toolPolicyService(
+      io.oryxos.storage.ToolPolicyRuleRepository repository, ToolRegistry toolRegistry) {
+    return new io.oryxos.storage.ToolPolicyServiceImpl(
+        repository, name -> toolRegistry.mcpToolOwners().get(name));
+  }
+
+  /**
+   * 020：策略加载期告警（未知目标规则 / 有效集全空，WARN 不阻断）。仅 SERVLET 模式（serve/gateway）跑—— CLI 管理命令用
+   * WebApplicationType.NONE，不受影响（镜像 018 ApiKeyStartupCheck 的条件口径）。
+   */
+  @Bean
+  @org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication(
+      type =
+          org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication.Type.SERVLET)
+  ToolPolicyStartupCheck toolPolicyStartupCheck(
+      io.oryxos.core.policy.ToolPolicyService toolPolicyService,
+      ProfileRegistry profileRegistry,
+      ToolRegistry toolRegistry) {
+    return new ToolPolicyStartupCheck(toolPolicyService, profileRegistry, toolRegistry);
+  }
+
   @Bean
   PromptBuilder promptBuilder(
-      ContextLoader contextLoader, Map<String, OryxTool> tools, MemoryService memoryService) {
+      ContextLoader contextLoader,
+      Map<String, OryxTool> tools,
+      MemoryService memoryService,
+      io.oryxos.core.policy.ToolPolicyService toolPolicyService) {
     // 22 节起：注入 MemoryService，长期记忆段由门面供给（会话历史段仍由 PromptBuilder 独立负责）
-    return new PromptBuilder(
-        contextLoader, tools, memoryService, java.time.Clock.systemDefaultZone());
+    PromptBuilder builder =
+        new PromptBuilder(contextLoader, tools, memoryService, java.time.Clock.systemDefaultZone());
+    builder.setToolPolicy(toolPolicyService); // 020：事前过滤——被 deny 工具不进模型清单
+    return builder;
   }
 
   @Bean
@@ -768,10 +805,14 @@ public class OryxOsRuntime {
       ToolRegistry toolRegistry,
       ProfileRegistry profileRegistry,
       ToolInvocationAuditor auditor,
-      AgentRunEventPublisher agentRunEventPublisher) {
+      AgentRunEventPublisher agentRunEventPublisher,
+      io.oryxos.core.policy.ToolPolicyService toolPolicyService) {
     // 31 节：mcp_servers 白名单在此接线。mcpToolOwners() 是活视图，与 tools bean 一样不能在构造时 copyOf。
-    return new ToolExecutor(
-        tools, toolRegistry.mcpToolOwners(), profileRegistry, auditor, agentRunEventPublisher);
+    ToolExecutor executor =
+        new ToolExecutor(
+            tools, toolRegistry.mcpToolOwners(), profileRegistry, auditor, agentRunEventPublisher);
+    executor.setToolPolicy(toolPolicyService); // 020：事中裁决——防幻觉调用与热更新窗口
+    return executor;
   }
 
   @Bean
@@ -889,6 +930,14 @@ public class OryxOsRuntime {
             io.oryxos.channel.feishu.FeishuChannelAdapter.TYPE,
             resolved ->
                 new io.oryxos.channel.feishu.FeishuChannelAdapter(
+                    resolved, profileRegistry, inboundMessageService, channelOutboundGuard),
+            io.oryxos.channel.wecom.WeComChannelAdapter.TYPE,
+            resolved ->
+                new io.oryxos.channel.wecom.WeComChannelAdapter(
+                    resolved, profileRegistry, inboundMessageService, channelOutboundGuard),
+            io.oryxos.channel.dingtalk.DingTalkChannelAdapter.TYPE,
+            resolved ->
+                new io.oryxos.channel.dingtalk.DingTalkChannelAdapter(
                     resolved, profileRegistry, inboundMessageService, channelOutboundGuard)));
   }
 
