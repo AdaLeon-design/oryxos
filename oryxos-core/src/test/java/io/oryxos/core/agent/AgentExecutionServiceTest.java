@@ -90,7 +90,8 @@ class AgentExecutionServiceTest {
               current.inputPreview(),
               current.cancelRequestedAt(),
               status,
-              stopReason));
+              stopReason,
+              current.traceId()));
     }
 
     @Override
@@ -125,7 +126,8 @@ class AgentExecutionServiceTest {
               current.inputPreview(),
               current.cancelRequestedAt(),
               "RUNNING",
-              current.stopReason()));
+              current.stopReason(),
+              current.traceId()));
     }
 
     @Override
@@ -150,7 +152,8 @@ class AgentExecutionServiceTest {
               current.inputPreview(),
               at,
               "CANCELLING",
-              current.stopReason()));
+              current.stopReason(),
+              current.traceId()));
     }
 
     @Override

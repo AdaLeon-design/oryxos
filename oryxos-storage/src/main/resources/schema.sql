@@ -10,14 +10,15 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     total_tokens INTEGER,
     cost_micros INTEGER,
     profile_name VARCHAR(255),
+    trace_id VARCHAR(64),
     success BOOLEAN NOT NULL,
     error_message TEXT,
     duration_ms INTEGER NOT NULL,
     created_at TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls (session_id);
--- idx_llm_calls_profile (profile_name) 由 AuditSchemaUpgrade 创建：本脚本先于升级器执行，
--- 存量库此刻还没有 profile_name 列，在这里建索引会让整个应用启动失败（idx_memory_agent 教训）。
+-- idx_llm_calls_profile (profile_name) / idx_llm_calls_trace (trace_id) 由 AuditSchemaUpgrade 创建：
+-- 本脚本先于升级器执行，存量库此刻还没有这些列，在这里建索引会让整个应用启动失败（idx_memory_agent 教训）。
 
 -- tool_invocations：工具调用审计（宪法 V：Day One 落库，成功要记、失败也要记）
 CREATE TABLE IF NOT EXISTS tool_invocations (
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tool_invocations (
     input_json TEXT,
     result_json TEXT,
     profile_name VARCHAR(255),
+    trace_id VARCHAR(64),
     success BOOLEAN NOT NULL,
     error_message TEXT,
     blocked_by VARCHAR(16),
@@ -34,7 +36,7 @@ CREATE TABLE IF NOT EXISTS tool_invocations (
     created_at TIMESTAMP NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tool_invocations_session ON tool_invocations (session_id);
--- idx_tool_invocations_profile (profile_name) 由 AuditSchemaUpgrade 创建（同上）。
+-- idx_tool_invocations_profile (profile_name) / idx_tool_invocations_trace (trace_id) 由 AuditSchemaUpgrade 创建（同上）。
 
 -- sessions：会话元数据 + JSON 序列化的对话历史（18 节）
 -- session_id 由 SessionManager 按 channel:user:profile 唯一拼接（全库唯一拼接点，H4④）
@@ -91,6 +93,7 @@ CREATE TABLE IF NOT EXISTS agent_executions (
     agent_name VARCHAR(255) NOT NULL,
     source VARCHAR(32) NOT NULL,
     session_id VARCHAR(512),
+    trace_id VARCHAR(64),
     started_at TIMESTAMP NOT NULL,
     ended_at TIMESTAMP,
     success BOOLEAN,
@@ -104,6 +107,7 @@ CREATE TABLE IF NOT EXISTS agent_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_executions_agent ON agent_executions (agent_name);
 CREATE INDEX IF NOT EXISTS idx_agent_executions_started ON agent_executions (started_at, id);
+-- idx_agent_executions_trace (trace_id) 由 AuditSchemaUpgrade 创建（同上，021）。
 
 -- agent_run_events：流式工作台 append-only 活动事件（每 Run 单调 sequence）
 CREATE TABLE IF NOT EXISTS agent_run_events (
@@ -166,7 +170,8 @@ CREATE TABLE IF NOT EXISTS notify_channels (
 -- providers：LLM Provider 动态注册表（31 节）——name → api_key + base_url + 描述；管理台可 CRUD、运行时按名动态建 ChatModel。
 -- 启动时仅把 config/application.yml 中数据库尚不存在且有效的 Provider 作为首次种子；
 -- 已有同名记录绝不从 YAML 覆盖，之后以本表为唯一运行时事实源。
--- 注意：api_key 明文落库（本地 gitignored 库）——这是"可动态管理"对宪法"凭证走环境变量"的核心阶段让步。
+-- api_key 密文落库（022，enc:v1: 前缀，AES-256-GCM）：主密钥两档（ORYXOS_MASTER_KEY 环境变量优先，
+-- 缺省 .oryxos/master.key 首启自动生成）——"核心阶段明文让步"已收回，详见部署文档「主密钥」节。
 CREATE TABLE IF NOT EXISTS providers (
     name VARCHAR(128) PRIMARY KEY,
     api_key TEXT,

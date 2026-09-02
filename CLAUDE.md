@@ -236,6 +236,7 @@ settings:
 | `result_json` | TEXT | 执行结果 |
 | `success` | BOOLEAN | 是否成功 |
 | `error_message` | TEXT | 错误信息（可空） |
+| `trace_id` | VARCHAR(64) | 单轮处理串联标识（021，可空；一次消息处理=一个 trace） |
 | `duration_ms` | BIGINT | 执行耗时 |
 | `created_at` | TIMESTAMP | 调用时间 |
 
@@ -250,6 +251,7 @@ settings:
 | `prompt_tokens` | INT | 输入 token 数 |
 | `completion_tokens` | INT | 输出 token 数 |
 | `total_tokens` | INT | 总 token 数 |
+| `trace_id` | VARCHAR(64) | 单轮处理串联标识（021，可空；与 tool_invocations/agent_executions 同值） |
 | `duration_ms` | BIGINT | 调用耗时 |
 | `created_at` | TIMESTAMP | 调用时间 |
 
@@ -376,6 +378,8 @@ provider:
 ```
 
 `ConfigLoader` 启动时做必填项和格式校验，缺失或非法时给清晰报错，不静默失败。
+
+落库凭证（providers.api_key、notify_channels.config 敏感项）经主密钥 AES-GCM 加密存储（022，`enc:v1:` 前缀）：`ORYXOS_MASTER_KEY` 环境变量优先，缺省 `.oryxos/master.key` 首启自动生成；密钥不匹配启动即拒并指路恢复。
 
 ---
 

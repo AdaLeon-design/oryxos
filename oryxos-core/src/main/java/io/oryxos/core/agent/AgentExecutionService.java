@@ -59,8 +59,20 @@ public class AgentExecutionService {
 
   public long triggerAsync(
       String agentName, String source, String sessionId, String inputPreview, Runnable work) {
-    long id = store.start(agentName, source, clock.instant(), inputPreview);
-    executor.execute(() -> runInContext(id, agentName, source, sessionId, work));
+    // 021 唯一跨线程传递点（R4）：主线程生成 trace → 落执行记录（store 自读上下文）→ 显式传入后台虚拟线程。
+    // ThreadLocal 不跨线程，靠闭包捕获的 traceId 在后台线程重新置入，work 内 AgentService 兜底 openIfAbsent 复用同值。
+    final String traceId;
+    final long id;
+    try (TraceContext.Scope scope = TraceContext.openIfAbsent()) {
+      traceId = scope.traceId();
+      id = store.start(agentName, source, clock.instant(), inputPreview);
+    }
+    executor.execute(
+        () -> {
+          try (TraceContext.Scope scope = TraceContext.open(traceId)) {
+            runInContext(id, agentName, source, sessionId, work);
+          }
+        });
     return id;
   }
 
