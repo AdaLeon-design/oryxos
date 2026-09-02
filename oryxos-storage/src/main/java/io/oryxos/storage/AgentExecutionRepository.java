@@ -22,7 +22,7 @@ public interface AgentExecutionRepository extends JpaRepository<AgentExecutionEn
   List<AgentExecutionEntity> findByStatusIn(java.util.Collection<String> statuses);
 
   @Modifying(clearAutomatically = true, flushAutomatically = true)
-  @Transactional
+  @Transactional(rollbackFor = Exception.class)
   @Query(
       """
       update AgentExecutionEntity e
@@ -32,7 +32,7 @@ public interface AgentExecutionRepository extends JpaRepository<AgentExecutionEn
   int markRunningIfOpen(@Param("id") long id, @Param("updatedAt") java.time.Instant updatedAt);
 
   @Modifying(clearAutomatically = true, flushAutomatically = true)
-  @Transactional
+  @Transactional(rollbackFor = Exception.class)
   @Query(
       """
       update AgentExecutionEntity e
@@ -45,7 +45,7 @@ public interface AgentExecutionRepository extends JpaRepository<AgentExecutionEn
       @Param("id") long id, @Param("requestedAt") java.time.Instant requestedAt);
 
   @Modifying(clearAutomatically = true, flushAutomatically = true)
-  @Transactional
+  @Transactional(rollbackFor = Exception.class)
   @Query(
       """
       update AgentExecutionEntity e
@@ -70,7 +70,7 @@ public interface AgentExecutionRepository extends JpaRepository<AgentExecutionEn
       @Param("stopReason") String stopReason);
 
   @Modifying(clearAutomatically = true, flushAutomatically = true)
-  @Transactional
+  @Transactional(rollbackFor = Exception.class)
   @Query("update AgentExecutionEntity e set e.updatedAt = :updatedAt where e.id = :id")
   int touchUpdatedAt(@Param("id") long id, @Param("updatedAt") java.time.Instant updatedAt);
 }
