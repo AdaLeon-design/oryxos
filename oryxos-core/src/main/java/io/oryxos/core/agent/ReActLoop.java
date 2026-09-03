@@ -25,30 +25,52 @@ public class ReActLoop {
 
   private static final int CONVERGENCE_REMAINING_THRESHOLD = 2;
 
+  /** 用户手动中断的收尾答复（进度流据此走取消态而非绿卡「回答」）。 */
+  public static final String INTERRUPTED_REPLY = "已收到停止指令，推理已中断";
+
   private final PromptBuilder promptBuilder;
   private final ProviderService providerService;
   private final ToolExecutor toolExecutor;
   private final AgentRunEventPublisher events;
+  private final InterruptManager interruptManager;
 
   public ReActLoop(
       PromptBuilder promptBuilder, ProviderService providerService, ToolExecutor toolExecutor) {
-    this(promptBuilder, providerService, toolExecutor, null);
+    this(promptBuilder, providerService, toolExecutor, null, null);
   }
 
-  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
-      value = "EI_EXPOSE_REP2",
-      justification =
-          "promptBuilder/toolExecutor 为 Spring 装配的共享单例（020 起带策略 setter 故为可变类），"
-              + "构造注入存同一引用正是意图（镜像既有 SuppressFBWarnings 模式）。")
   public ReActLoop(
       PromptBuilder promptBuilder,
       ProviderService providerService,
       ToolExecutor toolExecutor,
       AgentRunEventPublisher events) {
+    this(promptBuilder, providerService, toolExecutor, events, null);
+  }
+
+  public ReActLoop(
+      PromptBuilder promptBuilder,
+      ProviderService providerService,
+      ToolExecutor toolExecutor,
+      InterruptManager interruptManager) {
+    this(promptBuilder, providerService, toolExecutor, null, interruptManager);
+  }
+
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification =
+          "promptBuilder/toolExecutor/interruptManager 为 Runtime 装配的共享单例，"
+              + "构造注入存同一引用正是意图（镜像既有 SuppressFBWarnings 模式）。")
+  public ReActLoop(
+      PromptBuilder promptBuilder,
+      ProviderService providerService,
+      ToolExecutor toolExecutor,
+      AgentRunEventPublisher events,
+      InterruptManager interruptManager) {
     this.promptBuilder = promptBuilder;
     this.providerService = providerService;
     this.toolExecutor = toolExecutor;
     this.events = events;
+    this.interruptManager = interruptManager;
   }
 
   public String run(Session session, String userMessage, Profile profile) {
@@ -73,6 +95,10 @@ public class ReActLoop {
     session.appendUser(userMessage, media);
     // 最大轮数兜底（坑一）：模型可能反复要调工具永不收敛，转够强制退出
     for (int i = 0; i < profile.settings().maxIterations(); i++) {
+      if (interruptManager != null && interruptManager.isInterrupted(session.sessionId())) {
+        interruptManager.clear(session.sessionId());
+        return INTERRUPTED_REPLY;
+      }
       checkCancel();
       long stepStarted = System.currentTimeMillis();
       publish(
@@ -112,6 +138,11 @@ public class ReActLoop {
       }
       for (ToolCallRequest call : response.toolCalls()) {
         checkCancel();
+        // 工具间隙再查一次，避免长工具链整段跑完才响应 /stop
+        if (interruptManager != null && interruptManager.isInterrupted(session.sessionId())) {
+          interruptManager.clear(session.sessionId());
+          return INTERRUPTED_REPLY;
+        }
         // 执行权只在 ToolExecutor（宪法 I/II）；失败结果同样回填，模型下一轮自行决定
         // 传 profile.name() 作为 Agent 名：记忆类工具据此落到本 Agent 专属 MEMORY.md（30 节）
         listener.onToolStart(call.name());

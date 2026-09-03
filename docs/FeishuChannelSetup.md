@@ -88,6 +88,8 @@
 
 4. **免重启管理**（可选）：`/api/v1/channels` 提供 CRUD——新增 / 改绑 / 停用渠道即时生效，无需重启进程；凭证在接口出入参中始终保持 `${ENV}` 字面量或掩码，不回显明文。
 
+**进度提示对照**：飞书用交互卡片原地更新（首 token 前 idle 心跳；`/stop` → 红卡「已停止」）；企微/钉钉无 PATCH，采用「正在思考…」占位、至多一条工具进度后再发终态。私聊 `/new`、私聊/群聊 `/stop`（仅进行中任务）由核心编排，三渠道一致。
+
 ## 八、常见问题
 
 | 现象 | 排查 |
@@ -97,7 +99,7 @@
 | status 为 ERROR：`app_secret 未配置或环境变量未解析` | 启动 shell 里没有 `FEISHU_APP_SECRET`；`source` env 文件后重启或经 REST 重建渠道 |
 | status 为 ERROR：`绑定的 Agent xxx 不存在` | `channels.yaml` 的 `agent` 必须是 `.oryxos/agents/` 下的目录名 |
 | 长连接建立失败 | 确认出方向可达 `open.feishu.cn:443`（HTTPS + WebSocket）；无需任何入方向端口 |
-| 收到「当前仅支持文本提问」 | 语音 / 文件等非图类型仍不在范围；**图片已支持**（入站下载后走 Vision）。若仍出现：确认事件含 image，且渠道进程可出站访问 `open.feishu.cn` |
+| 收到「当前仅支持文本或图片」 | 语音 / 文件等非图类型仍不在范围；**图片已支持**（入站下载后走 Vision）。若仍出现：确认事件含 image，且渠道进程可出站访问 `open.feishu.cn` |
 | 多个 Agent 接入 | 一应用一 Agent；再建一个飞书应用 + `channels.yaml` 加一个条目 |
 
 ## 九、审计口径

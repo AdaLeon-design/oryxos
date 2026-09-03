@@ -5,6 +5,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
@@ -13,7 +14,8 @@ import org.slf4j.LoggerFactory;
 /**
  * 存量 SQLite 幂等升级：给 agent_executions 补 Run 元数据列，并确保 agent_run_events 存在。
  *
- * <p>新装库由 schema.sql 全量建表；本升级器只处理缺列/缺表的旧库。补列 SQL 全部写死，避免动态拼表名/列名。
+ * <p>新装库由 Flyway V1 全量建表（SQLite / PostgreSQL 基线都已含工作台列与事件表）。本升级器只处理缺列/缺表的旧 SQLite 库；PostgreSQL
+ * 上直接跳过（PRAGMA 与 AUTOINCREMENT 都是 SQLite 方言）。补列 SQL 全部写死，避免动态拼表名/列名。
  */
 public final class AgentRunSchemaUpgrade {
 
@@ -36,11 +38,22 @@ public final class AgentRunSchemaUpgrade {
 
   public void upgrade() {
     try (Connection connection = dataSource.getConnection()) {
+      if (!isSqlite(connection)) {
+        return;
+      }
       ensureExecutionColumns(connection);
       ensureEventTable(connection);
     } catch (SQLException e) {
       throw new IllegalStateException("Failed to upgrade agent run schema", e);
     }
+  }
+
+  private static boolean isSqlite(Connection connection) throws SQLException {
+    return connection
+        .getMetaData()
+        .getDatabaseProductName()
+        .toLowerCase(Locale.ROOT)
+        .contains("sqlite");
   }
 
   private static void ensureExecutionColumns(Connection connection) throws SQLException {

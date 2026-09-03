@@ -12,6 +12,7 @@ import io.oryxos.core.agent.AgentRunEventStore;
 import io.oryxos.core.agent.AgentScheduler;
 import io.oryxos.core.agent.AgentService;
 import io.oryxos.core.agent.AgentStore;
+import io.oryxos.core.agent.InterruptManager;
 import io.oryxos.core.agent.PromptBuilder;
 import io.oryxos.core.agent.ReActLoop;
 import io.oryxos.core.agent.ScheduledTaskStore;
@@ -58,7 +59,6 @@ import io.oryxos.storage.AgentExecutionRepository;
 import io.oryxos.storage.AgentRunEventRepository;
 import io.oryxos.storage.ApiKeyRepository;
 import io.oryxos.storage.ApiKeyService;
-import io.oryxos.storage.AuditSchemaUpgrade;
 import io.oryxos.storage.JpaAgentExecutionStore;
 import io.oryxos.storage.JpaAgentRunEventStore;
 import io.oryxos.storage.JpaLlmCallAuditor;
@@ -75,7 +75,6 @@ import io.oryxos.storage.LlmProviderRepository;
 import io.oryxos.storage.MemoryEntryRepository;
 import io.oryxos.storage.NotifyChannelRepository;
 import io.oryxos.storage.SandboxWhitelistRepository;
-import io.oryxos.storage.ScheduleSchemaUpgrade;
 import io.oryxos.storage.ScheduledTaskRepository;
 import io.oryxos.storage.SessionRepository;
 import io.oryxos.storage.TaskExecutionRepository;
@@ -86,6 +85,7 @@ import io.oryxos.storage.WebUserRepository;
 import io.oryxos.storage.WebUserService;
 import io.oryxos.tool.ToolRegistry;
 import io.oryxos.tool.builtin.FileTools;
+import io.oryxos.tool.builtin.FormatTools;
 import io.oryxos.tool.builtin.HttpTools;
 import io.oryxos.tool.builtin.InteractionTools;
 import io.oryxos.tool.builtin.NotifyTools;
@@ -104,12 +104,18 @@ import io.oryxos.tool.notify.NotifyChannelAdapter;
 import io.oryxos.tool.notify.NotifyPoster;
 import io.oryxos.tool.notify.WeComNotifyAdapter;
 import io.oryxos.tool.notify.WebhookNotifyAdapter;
+import io.oryxos.tool.sandbox.CidfileProcessWrapper;
+import io.oryxos.tool.sandbox.DockerProcessStarter;
+import io.oryxos.tool.sandbox.ExecutionBackendProperties;
 import io.oryxos.tool.sandbox.FileSandboxProperties;
 import io.oryxos.tool.sandbox.HttpSandboxProperties;
+import io.oryxos.tool.sandbox.LocalProcessStarter;
+import io.oryxos.tool.sandbox.ProcessStarter;
 import io.oryxos.tool.sandbox.Sandbox;
 import io.oryxos.tool.sandbox.ShellSandboxProperties;
 import io.oryxos.tool.sandbox.SmtpSandboxProperties;
 import io.oryxos.tool.sandbox.WhitelistSandbox;
+import io.oryxos.tool.sandbox.WorkspacePathMapper;
 import io.oryxos.tool.web.DuckDuckGoSearchProvider;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
@@ -154,7 +160,8 @@ import org.springframework.web.context.WebApplicationContext;
   FileSandboxProperties.class,
   ShellSandboxProperties.class,
   HttpSandboxProperties.class,
-  SmtpSandboxProperties.class
+  SmtpSandboxProperties.class,
+  ExecutionBackendProperties.class
 })
 public class OryxOsRuntime {
 
@@ -207,13 +214,6 @@ public class OryxOsRuntime {
     return new JpaPricingStore(repository);
   }
 
-  /** 016 审计看板：llm_calls/tool_invocations 补列 + 建 llm_pricing 表（幂等，先跑 schema.sql）。 */
-  @Bean
-  @DependsOn("dataSourceScriptDatabaseInitializer")
-  AuditSchemaUpgrade auditSchemaUpgrade(DataSource dataSource) {
-    return new AuditSchemaUpgrade(dataSource);
-  }
-
   /** 022：落库凭证加解密——主密钥两档解析（ORYXOS_MASTER_KEY 优先，缺省 {oryxos.root}/master.key 首启自动生成）。 */
   @Bean
   io.oryxos.core.secret.SecretCipher secretCipher() {
@@ -221,9 +221,9 @@ public class OryxOsRuntime {
         new io.oryxos.core.secret.MasterKeyResolver(oryxosRoot()).resolve());
   }
 
-  /** 022：存量明文迁移 + 密钥守卫（幂等；密钥不匹配拒启指路）。数据源就绪后执行，AuditSchemaUpgrade 同位。 */
+  /** 022：存量明文迁移 + 密钥守卫（幂等；密钥不匹配拒启指路）。025 起表结构由 Flyway 收敛，迁移完才跑。 */
   @Bean
-  @DependsOn("dataSourceScriptDatabaseInitializer")
+  @DependsOn("flywayInitializer")
   io.oryxos.storage.SecretMigration secretMigration(
       LlmProviderRepository providerRepository,
       NotifyChannelRepository channelRepository,
@@ -250,9 +250,7 @@ public class OryxOsRuntime {
       ProviderRegistry providerRegistry,
       LlmCallAuditor auditor,
       PricingStore pricingStore,
-      AuditSchemaUpgrade auditSchemaUpgrade,
       io.oryxos.core.metrics.MetricsRecorder metricsRecorder) {
-    auditSchemaUpgrade.upgrade(); // 幂等：存量库补列 + 建 llm_pricing 表
     // 动态解析（31 节）：按名从注册表取参数、经工厂即时建/缓存 ChatModel（宪法 III 显式映射，只是运行时可变）
     ProviderChatModelFactory factory = new ProviderChatModelFactory();
     return new SpringAiProviderServiceImpl(
@@ -660,20 +658,12 @@ public class OryxOsRuntime {
     return RestClient.builder().requestFactory(toolHttpRequestFactory()).build();
   }
 
-  /** 015 FR-014：memory_entries 幂等补 agent_name 列（照 ScheduleSchemaUpgrade 先例，先跑 schema.sql）。 */
-  @Bean
-  @DependsOn("dataSourceScriptDatabaseInitializer")
-  io.oryxos.storage.MemorySchemaUpgrade memorySchemaUpgrade(DataSource dataSource) {
-    return new io.oryxos.storage.MemorySchemaUpgrade(dataSource);
-  }
-
   /** 长期记忆后端：按 memory.backend 选一档（默认 markdown）——这是第 21/22 节"接口墙"的装配落点。 */
   @Bean
   LongTermMemoryStore longTermMemoryStore(
       @org.springframework.beans.factory.annotation.Value("${memory.backend:markdown}")
           String backend,
       MemoryEntryRepository memoryEntryRepository,
-      io.oryxos.storage.MemorySchemaUpgrade memorySchemaUpgrade,
       RestClient restClient,
       @org.springframework.beans.factory.annotation.Value("${memory.mem0.base-url:}")
           String mem0BaseUrl,
@@ -681,7 +671,6 @@ public class OryxOsRuntime {
           String mem0UserId,
       @org.springframework.beans.factory.annotation.Value("${memory.mem0.api-key:}")
           String mem0ApiKey) {
-    memorySchemaUpgrade.upgrade(); // 幂等：存量库补列，新装/已升级库 no-op
     return switch (backend) {
       case "sqlite" -> new SqliteMemoryStore(memoryEntryRepository);
       case "mem0" ->
@@ -785,16 +774,27 @@ public class OryxOsRuntime {
       NotifyChannelRegistry notifyChannelRegistry,
       McpClientService mcpClientService,
       UserInteraction userInteraction,
-      io.oryxos.core.knowledge.KnowledgeService knowledgeService) {
+      io.oryxos.core.knowledge.KnowledgeService knowledgeService,
+      ExecutionBackendProperties executionBackendProperties) {
     ToolRegistry registry = new ToolRegistry();
     // 内置工具走 @Tool 注解管道（schema 自动生成，宪法 II 第二件事）
     registry.registerAnnotated(new FileTools(sandbox)); // read/write/list/edit/grep/glob
-    registry.registerAnnotated(new ShellTools(sandbox));
+    // 024：执行后端按档位装配（local=现状零变化 / docker=短命容器），白名单 enforce 仍在工具内部前置（FR-007）
+    ProcessStarter shellStarter =
+        executionBackendProperties.isDocker()
+            ? new DockerProcessStarter(
+                executionBackendProperties,
+                new WorkspacePathMapper(oryxosRoot()),
+                CidfileProcessWrapper.dockerCliKiller())
+            : new LocalProcessStarter();
+    registry.registerAnnotated(new ShellTools(sandbox, shellStarter));
     registry.registerAnnotated(
         new HttpTools(sandbox, restClient)); // + http_request/fetch_webpage/download_file
     registry.registerAnnotated(new UtilTools()); // current_time / json_extract（纯计算，无沙箱）
     registry.registerAnnotated(
         new WebSearchTools(sandbox, new DuckDuckGoSearchProvider(restClient, sandbox)));
+    registry.registerAnnotated(
+        new FormatTools(sandbox)); // format_sql / export_excel（写路径过 FILE 白名单）
     // chat → ConsoleUserInteraction；serve/gateway → UnsupportedUserInteraction（见 userInteraction
     // bean）
     registry.registerAnnotated(new InteractionTools(userInteraction));
@@ -862,6 +862,15 @@ public class OryxOsRuntime {
     return new ToolPolicyStartupCheck(toolPolicyService, profileRegistry, toolRegistry);
   }
 
+  /** 024 FR-005：docker 档启动校验（CLI/daemon/镜像，fail loud）；local 档零检查零开销。 */
+  @Bean
+  @org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication(
+      type =
+          org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication.Type.SERVLET)
+  DockerBackendStartupCheck dockerBackendStartupCheck(ExecutionBackendProperties props) {
+    return new DockerBackendStartupCheck(props);
+  }
+
   @Bean
   PromptBuilder promptBuilder(
       ContextLoader contextLoader,
@@ -894,12 +903,19 @@ public class OryxOsRuntime {
   }
 
   @Bean
+  InterruptManager interruptManager() {
+    return new InterruptManager();
+  }
+
+  @Bean
   ReActLoop reActLoop(
       PromptBuilder promptBuilder,
       ProviderService providerService,
       ToolExecutor toolExecutor,
-      AgentRunEventPublisher agentRunEventPublisher) {
-    return new ReActLoop(promptBuilder, providerService, toolExecutor, agentRunEventPublisher);
+      AgentRunEventPublisher agentRunEventPublisher,
+      InterruptManager interruptManager) {
+    return new ReActLoop(
+        promptBuilder, providerService, toolExecutor, agentRunEventPublisher, interruptManager);
   }
 
   @Bean
@@ -974,7 +990,8 @@ public class OryxOsRuntime {
       SessionManager sessionManager,
       ProfileRegistry profileRegistry,
       AgentExecutionService agentExecutionService,
-      io.oryxos.core.channel.MessageDeduplicator messageDeduplicator) {
+      io.oryxos.core.channel.MessageDeduplicator messageDeduplicator,
+      InterruptManager interruptManager) {
     return new io.oryxos.core.channel.InboundMessageService(
         agentService,
         sessionManager,
@@ -982,7 +999,8 @@ public class OryxOsRuntime {
         agentExecutionService,
         messageDeduplicator,
         new io.oryxos.core.channel.DefaultInboundMediaEnricher(),
-        java.time.Duration.ofSeconds(15)); // 「处理中」提示阈值（Edge Case：先行告知）
+        java.time.Duration.ofSeconds(15), // 「处理中」提示阈值（Edge Case：先行告知）
+        interruptManager);
   }
 
   /** 渠道出站守卫：渠道自建 HTTP 不被沙箱自动拦截，经此显式复用 http 域名白名单（宪法 VI / 017 R7）。 */
@@ -1038,24 +1056,10 @@ public class OryxOsRuntime {
     return scheduler;
   }
 
-  /** 28 节：定时任务状态与执行历史落 SQLite（重启不丢），并支撑管理台的查看/立即执行/启用停用。 */
-  /**
-   * Runs after schema.sql and before any scheduler store or scheduler bean can observe the tables.
-   * The upgrader derives idempotence solely from the live SQLite columns; it has no migration
-   * table.
-   */
-  @Bean
-  @DependsOn("dataSourceScriptDatabaseInitializer")
-  ScheduleSchemaUpgrade scheduleSchemaUpgrade(DataSource dataSource) {
-    return new ScheduleSchemaUpgrade(dataSource);
-  }
-
+  /** 28 节：定时任务状态与执行历史落库（重启不丢），并支撑管理台的查看/立即执行/启用停用。 */
   @Bean
   ScheduledTaskStore scheduledTaskStore(
-      ScheduleSchemaUpgrade scheduleSchemaUpgrade,
-      ScheduledTaskRepository taskRepository,
-      TaskExecutionRepository executionRepository) {
-    scheduleSchemaUpgrade.upgrade();
+      ScheduledTaskRepository taskRepository, TaskExecutionRepository executionRepository) {
     return new JpaScheduledTaskStore(taskRepository, executionRepository);
   }
 
@@ -1080,7 +1084,7 @@ public class OryxOsRuntime {
   }
 
   @Bean
-  @DependsOn("dataSourceScriptDatabaseInitializer")
+  @DependsOn("flywayInitializer")
   io.oryxos.storage.AgentRunSchemaUpgrade agentRunSchemaUpgrade(DataSource dataSource) {
     return new io.oryxos.storage.AgentRunSchemaUpgrade(dataSource);
   }

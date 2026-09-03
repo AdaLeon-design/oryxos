@@ -10,25 +10,17 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-@DataJpaTest
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@SqliteJpaTest
 class JpaAgentRunEventStoreTest {
 
   @TempDir static Path dbDir;
 
   @DynamicPropertySource
-  static void sqliteProperties(DynamicPropertyRegistry registry) {
+  static void datasource(DynamicPropertyRegistry registry) {
     registry.add("spring.datasource.url", () -> "jdbc:sqlite:" + dbDir.resolve("run-events.db"));
-    registry.add("spring.datasource.driver-class-name", () -> "org.sqlite.JDBC");
-    registry.add("spring.jpa.hibernate.ddl-auto", () -> "none");
-    registry.add(
-        "spring.jpa.database-platform", () -> "org.hibernate.community.dialect.SQLiteDialect");
-    registry.add("spring.sql.init.mode", () -> "always");
   }
 
   @Autowired AgentRunEventRepository repository;
