@@ -1,5 +1,7 @@
 package io.oryxos.cli;
 
+import io.oryxos.core.channel.InboundMediaLimits;
+import io.oryxos.core.session.InboundMediaExt;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -13,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
- * 调用本机 ffmpeg 将 silk/amr 等转成 Whisper 友好的 wav（16kHz mono）。
+ * 调用本机 ffmpeg 将 silk/amr/视频音轨等转成 Whisper 友好的 wav（16kHz mono）。
  *
  * <p>可执行文件：环境变量 {@code ORYXOS_FFMPEG}，否则 {@code ffmpeg}（依赖 PATH）。
  */
@@ -22,10 +24,13 @@ public final class FfmpegAudioConverter {
   static final String ERR_FFMPEG_MISSING = "需安装 ffmpeg";
   static final String ERR_FFMPEG_FAILED = "ffmpeg 转码失败";
 
-  private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(60);
+  private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(90);
   private static final int SAMPLE_RATE = 16_000;
   private static final int EXIT_COMMAND_NOT_FOUND = 127;
   private static final String EXT_WAV = ".wav";
+  private static final String EXT_MOV = ".mov";
+  private static final String EXT_MKV = ".mkv";
+  private static final String EXT_AVI = ".avi";
   private static final int STDERR_PREVIEW_MAX = 800;
 
   private final Function<List<String>, Process> processStarter;
@@ -52,15 +57,22 @@ public final class FfmpegAudioConverter {
   }
 
   /**
-   * 将 {@code input} 转为同目录临时 wav；调用方负责删除。若输入已是 Whisper 原生格式则原样返回（不创建临时文件）。
+   * 将 {@code input} 转为同目录临时 wav；调用方负责删除。若输入已是 Whisper 原生音频格式则原样返回（不创建临时文件）。
    *
    * @throws IOException 找不到 ffmpeg、超时或非零退出
    */
   public Path toWhisperWav(Path input) throws IOException {
+    return toWhisperWav(input, false);
+  }
+
+  /**
+   * @param extractAudioTrack true 时强制 {@code -vn} 抽音轨（视频）；并限制时长与输出大小
+   */
+  public Path toWhisperWav(Path input, boolean extractAudioTrack) throws IOException {
     if (input == null || !Files.isRegularFile(input)) {
       throw new IOException("音频文件不存在: " + input);
     }
-    if (isWhisperNative(input)) {
+    if (!extractAudioTrack && isWhisperNative(input)) {
       return input;
     }
     Path parent = input.getParent();
@@ -73,11 +85,27 @@ public final class FfmpegAudioConverter {
     cmd.add("-y");
     cmd.add("-i");
     cmd.add(input.toAbsolutePath().toString());
+    if (extractAudioTrack) {
+      cmd.add("-vn");
+      cmd.add("-t");
+      cmd.add(Integer.toString(InboundMediaLimits.MAX_VIDEO_ASR_SECONDS));
+    }
     cmd.add("-ar");
     cmd.add(Integer.toString(SAMPLE_RATE));
     cmd.add("-ac");
     cmd.add("1");
     cmd.add(output.toAbsolutePath().toString());
+    runFfmpeg(cmd, output);
+    long size = Files.size(output);
+    if (size > InboundMediaLimits.MAX_ASR_UPLOAD_BYTES) {
+      deleteQuietly(output);
+      throw new IOException(
+          ERR_FFMPEG_FAILED + ": 输出超过 " + InboundMediaLimits.MAX_ASR_UPLOAD_BYTES + " 字节");
+    }
+    return output;
+  }
+
+  private void runFfmpeg(List<String> cmd, Path output) throws IOException {
     Process process;
     try {
       process = processStarter.apply(cmd);
@@ -91,13 +119,20 @@ public final class FfmpegAudioConverter {
       throw new IOException(ERR_FFMPEG_MISSING + "（无法启动进程）");
     }
     try {
-      String stderr = readLimited(process.getErrorStream());
+      java.io.ByteArrayOutputStream errBuf = new java.io.ByteArrayOutputStream(STDERR_PREVIEW_MAX);
+      Thread errDrainer =
+          Thread.ofVirtual()
+              .name("oryxos-ffmpeg-stderr")
+              .start(() -> copyStderrPreview(process.getErrorStream(), errBuf));
       boolean finished = process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
       if (!finished) {
         process.destroyForcibly();
         deleteQuietly(output);
         throw new IOException(ERR_FFMPEG_FAILED + ": 超时");
       }
+      errDrainer.join(1_000L);
+      String stderr =
+          errBuf.toString(StandardCharsets.UTF_8).replace('\r', ' ').replace('\n', ' ').strip();
       int code = process.exitValue();
       if (code != 0) {
         deleteQuietly(output);
@@ -110,11 +145,28 @@ public final class FfmpegAudioConverter {
         deleteQuietly(output);
         throw new IOException(ERR_FFMPEG_FAILED + ": 输出为空");
       }
-      return output;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       deleteQuietly(output);
       throw new IOException(ERR_FFMPEG_FAILED + ": 中断", e);
+    }
+  }
+
+  private static void copyStderrPreview(InputStream in, java.io.ByteArrayOutputStream errBuf) {
+    if (in == null) {
+      return;
+    }
+    try {
+      byte[] chunk = new byte[256];
+      int n;
+      while ((n = in.read(chunk)) >= 0) {
+        int room = STDERR_PREVIEW_MAX - errBuf.size();
+        if (room > 0) {
+          errBuf.write(chunk, 0, Math.min(n, room));
+        }
+      }
+    } catch (IOException ignored) {
+      // best-effort：进程结束后流关闭属正常
     }
   }
 
@@ -136,9 +188,30 @@ public final class FfmpegAudioConverter {
         || lower.endsWith(".flac");
   }
 
+  /** 路径像视频容器（需 -vn 抽轨，不可当原生音频直传 Whisper）。 */
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings(
+      value = "IMPROPER_UNICODE",
+      justification = "仅对 ASCII 视频扩展名做 Locale.ROOT 小写匹配")
+  static boolean looksLikeVideo(Path file) {
+    Path name = file.getFileName();
+    if (name != null) {
+      String lower = name.toString().toLowerCase(Locale.ROOT);
+      if (lower.endsWith(InboundMediaExt.EXT_MP4)
+          || lower.endsWith(EXT_MOV)
+          || lower.endsWith(EXT_MKV)
+          || lower.endsWith(EXT_AVI)) {
+        return true;
+      }
+    }
+    return InboundMediaExt.isMp4Magic(file);
+  }
+
   static boolean needsFfmpegConversion(Path file, byte[] header) {
     if (isWhisperNative(file)) {
       return false;
+    }
+    if (looksLikeVideo(file)) {
+      return true;
     }
     if (io.oryxos.core.session.InboundMediaExt.isOggMagic(header)) {
       return false;
@@ -159,18 +232,6 @@ public final class FfmpegAudioConverter {
         || lower.contains("cannot find");
   }
 
-  private static String readLimited(InputStream in) {
-    if (in == null) {
-      return "";
-    }
-    try {
-      byte[] buf = in.readNBytes(STDERR_PREVIEW_MAX);
-      return new String(buf, StandardCharsets.UTF_8).replace('\r', ' ').replace('\n', ' ').strip();
-    } catch (IOException e) {
-      return "";
-    }
-  }
-
   private static void deleteQuietly(Path path) {
     if (path == null) {
       return;
@@ -187,7 +248,10 @@ public final class FfmpegAudioConverter {
       justification = "argv 列表传给 ProcessBuilder，不经 shell；路径来自本地落盘文件")
   private static Process startProcess(List<String> command) {
     try {
-      return new ProcessBuilder(command).redirectInput(ProcessBuilder.Redirect.PIPE).start();
+      return new ProcessBuilder(command)
+          .redirectInput(ProcessBuilder.Redirect.PIPE)
+          .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+          .start();
     } catch (IOException e) {
       throw new IllegalStateException(e.getMessage(), e);
     }
