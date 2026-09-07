@@ -73,6 +73,8 @@
         <module>oryxos-channel-feishu</module>
         <module>oryxos-channel-wecom</module>
         <module>oryxos-channel-dingtalk</module>
+        <module>oryxos-channel-slack</module>
+        <module>oryxos-channel-discord</module>
         <module>oryxos-web</module>
         <module>oryxos-storage</module>
         <module>oryxos-cli</module>
@@ -139,6 +141,16 @@
             <dependency>
                 <groupId>io.oryxos</groupId>
                 <artifactId>oryxos-channel-dingtalk</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.oryxos</groupId>
+                <artifactId>oryxos-channel-slack</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.oryxos</groupId>
+                <artifactId>oryxos-channel-discord</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
