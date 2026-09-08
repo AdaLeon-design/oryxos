@@ -21,9 +21,9 @@
 
 | 项 | 结果 |
 |----|------|
-| Telegram `getMe` | 通过，username=`rchuangbot` |
-| Telegram `getUpdates` | 空（Bot 尚无会话，无法取 `chat_id`） |
-| Telegram 私聊往返 / 群 @ / notify | **待你先私聊 [@rchuangbot](https://t.me/rchuangbot) 一条**，再补 `CONNECTED` + 回写 + notify |
+| Telegram `getMe` | 通过。Bot 是提交者**个人测试号**（username=`rchuangbot`），不是仓库官方 Bot，凭证只在本机 `.env` |
+| Telegram `getUpdates` | 空（该个人测试 Bot 尚无会话，无法取 `chat_id`） |
+| Telegram 私聊往返 / 群 @ / notify | 待该个人测试 Bot 先有一条私聊后，再补 `CONNECTED` + 回写 + notify |
 | Slack `auth.test` | 通过（team=`OryxOS`）；`conversations.list` 缺 scope，未打真实频道 |
 | Discord `@me` | 通过（username=`OryxOS`）；列频道 403，未打真实频道 |
 | WhatsApp / Teams / GChat / Mattermost / Matrix | 无可用凭证，未宣称 COMPLETE |
