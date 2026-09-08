@@ -1,4 +1,4 @@
-package io.oryxos.storage;
+package io.oryxos.storage.migration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.sqlite.SQLiteDataSource;
 
-class AgentRunSchemaUpgradeTest {
+class AgentRunColumnsMigrationTest {
 
   @TempDir Path tempDir;
 
@@ -37,9 +37,8 @@ class AgentRunSchemaUpgradeTest {
         "INSERT INTO agent_executions (agent_name, source, started_at, ended_at, success, duration_ms)"
             + " VALUES ('ops', 'manual', '2026-08-01T00:00:00Z', '2026-08-01T00:00:02Z', 1, 2000)");
 
-    AgentRunSchemaUpgrade upgrade = new AgentRunSchemaUpgrade(dataSource);
-    upgrade.upgrade();
-    upgrade.upgrade();
+    migrate(dataSource);
+    migrate(dataSource);
 
     assertThat(columns(dataSource, "agent_executions"))
         .contains("updated_at", "input_preview", "cancel_requested_at", "status", "stop_reason");
@@ -61,6 +60,12 @@ class AgentRunSchemaUpgradeTest {
     return dataSource;
   }
 
+  private static void migrate(SQLiteDataSource dataSource) throws Exception {
+    try (Connection connection = dataSource.getConnection()) {
+      new AgentRunColumnsMigration().migrate(connection);
+    }
+  }
+
   private static void execute(SQLiteDataSource dataSource, String... sqls) throws Exception {
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement()) {
@@ -71,14 +76,14 @@ class AgentRunSchemaUpgradeTest {
   }
 
   private static Set<String> columns(SQLiteDataSource dataSource, String table) throws Exception {
-    Set<String> columns = new HashSet<>();
+    Set<String> names = new HashSet<>();
     try (Connection connection = dataSource.getConnection();
         Statement statement = connection.createStatement();
         ResultSet rows = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
       while (rows.next()) {
-        columns.add(rows.getString("name"));
+        names.add(rows.getString("name"));
       }
     }
-    return columns;
+    return names;
   }
 }

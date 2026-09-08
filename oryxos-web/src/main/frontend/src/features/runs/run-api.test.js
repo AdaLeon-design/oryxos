@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { listAllRunEvents } from './run-api.js'
+import { listAllRunEvents, runStreamUrl } from './run-api.js'
 
 test('按 hasMore/nextAfter 循环补齐全部历史页', async () => {
   const pages = {
@@ -53,4 +53,10 @@ test('单页历史一次取完后即可用 nextAfter 作为 SSE 游标', async (
   } finally {
     globalThis.fetch = previous
   }
+})
+
+test('SSE URL 带上当前 after 游标', () => {
+  assert.equal(runStreamUrl(9, 41), '/api/v1/runs/9/stream?after=41')
+  assert.equal(runStreamUrl(9, 0), '/api/v1/runs/9/stream?after=0')
+  assert.equal(runStreamUrl(9), '/api/v1/runs/9/stream?after=0')
 })

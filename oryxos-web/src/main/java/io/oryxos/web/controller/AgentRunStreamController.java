@@ -16,9 +16,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -35,6 +37,7 @@ public class AgentRunStreamController {
   private static final long TIMEOUT_MS = 30 * 60 * 1000L;
   private static final long HEARTBEAT_SECONDS = 15;
   private static final int REPLAY_BATCH_SIZE = 500;
+  static final int LIVE_QUEUE_CAPACITY = 256;
 
   private final AgentExecutionService executionService;
   private final AgentRunEventStore eventStore;
@@ -46,33 +49,55 @@ public class AgentRunStreamController {
       AgentExecutionService executionService,
       AgentRunEventStore eventStore,
       AgentRunEventHub eventHub,
-      ExecutorService agentExecutionExecutor,
+      @Qualifier("agentRunStreamExecutor") ExecutorService agentRunStreamExecutor,
       ObjectMapper objectMapper) {
     this.executionService = executionService;
     this.eventStore = eventStore;
     this.eventHub = eventHub;
-    this.executor = agentExecutionExecutor;
+    this.executor = agentRunStreamExecutor;
     this.objectMapper = objectMapper;
   }
 
   @GetMapping(value = "/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
   public SseEmitter stream(
-      @PathVariable long runId, @RequestParam(required = false, defaultValue = "0") long after) {
+      @PathVariable long runId,
+      @RequestParam(required = false, defaultValue = "0") long after,
+      @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId) {
     if (executionService.findById(runId).isEmpty()) {
       throw new ResourceNotFoundException("Run 不存在: " + runId);
     }
+    long cursor = Math.max(after, parseLastEventId(lastEventId));
     SseEmitter emitter = new SseEmitter(TIMEOUT_MS);
     AtomicBoolean closed = new AtomicBoolean(false);
-    executor.execute(() -> push(runId, after, emitter, closed));
+    executor.execute(() -> push(runId, cursor, emitter, closed));
     emitter.onCompletion(() -> closed.set(true));
     emitter.onTimeout(() -> closed.set(true));
     emitter.onError(error -> closed.set(true));
     return emitter;
   }
 
+  static long parseLastEventId(String lastEventId) {
+    if (lastEventId == null || lastEventId.isBlank()) {
+      return 0L;
+    }
+    try {
+      return Long.parseLong(lastEventId.trim());
+    } catch (NumberFormatException e) {
+      return 0L;
+    }
+  }
+
   private void push(long runId, long after, SseEmitter emitter, AtomicBoolean closed) {
-    BlockingQueue<AgentRunEvent> incoming = new LinkedBlockingQueue<>();
-    try (AutoCloseable subscription = eventHub.subscribe(runId, incoming::offer)) {
+    BlockingQueue<AgentRunEvent> incoming = new LinkedBlockingQueue<>(LIVE_QUEUE_CAPACITY);
+    AtomicBoolean overflowed = new AtomicBoolean(false);
+    try (AutoCloseable subscription =
+        eventHub.subscribe(
+            runId,
+            event -> {
+              if (!incoming.offer(event)) {
+                overflowed.set(true);
+              }
+            })) {
       long cursor = after;
       while (!closed.get()) {
         java.util.List<AgentRunEvent> batch =
@@ -96,6 +121,10 @@ public class AgentRunStreamController {
         }
       }
       while (!closed.get()) {
+        if (overflowed.get()) {
+          emitter.completeWithError(new IllegalStateException("SSE live queue overflow"));
+          return;
+        }
         AgentRunEvent next = incoming.poll(HEARTBEAT_SECONDS, TimeUnit.SECONDS);
         if (closed.get()) {
           return;

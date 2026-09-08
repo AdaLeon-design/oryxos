@@ -30,7 +30,10 @@ const expanded = ref({})
 const elapsed = ref('—')
 let source = null
 let timer = null
+let reconnectTimer = null
 let reconnects = 0
+const MAX_RECONNECTS = 5
+const RECONNECT_MS = 1000
 
 const renderedAnswer = computed(() => {
   const text = state.value.answer
@@ -73,6 +76,10 @@ function jumpToLatest() {
 }
 
 function closeStream() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
   if (source) {
     source.close()
     source = null
@@ -102,12 +109,16 @@ function startStream() {
         return
       }
       reconnects += 1
-      if (reconnects >= 5) {
-        closeStream()
+      closeStream()
+      if (reconnects >= MAX_RECONNECTS) {
         state.value = setConnection(state.value, 'DISCONNECTED', '实时连接中断，可手动重试')
         return
       }
       state.value = setConnection(state.value, 'RECONNECTING')
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        startStream()
+      }, RECONNECT_MS)
     },
   )
 }
@@ -180,6 +191,7 @@ watch(state, updateElapsed, { deep: true })
             {{ connectionLabel(state.connection) }}
           </span>
         </div>
+        <p class="dim">实时进度是步骤/工具事件，不是 Chat 里的 token 打字机。</p>
         <dl class="meta-grid">
           <div><dt>来源</dt><dd>{{ state.run.source === 'schedule' ? '定时' : '手动' }}</dd></div>
           <div><dt>开始</dt><dd class="mono">{{ fmtTime(state.run.startedAt) }}</dd></div>

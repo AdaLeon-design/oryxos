@@ -125,7 +125,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
@@ -484,7 +484,7 @@ public class OryxOsRuntime {
   io.oryxos.knowledge.index.KnowledgeIndexService knowledgeIndexService(
       io.oryxos.knowledge.store.ChunkStore chunkStore,
       java.util.function.Supplier<io.oryxos.core.embedding.TextEmbedder> textEmbedderSupplier,
-      ExecutorService agentExecutionExecutor) {
+      @Qualifier("agentExecutionExecutor") ExecutorService agentExecutionExecutor) {
     // 两段式导入的后台段跑在虚拟线程执行器上（宪法 VII：同步代码 + 虚拟线程，无异步编程模型）
     return new io.oryxos.knowledge.index.KnowledgeIndexService(
         oryxosRoot().resolve("knowledge"),
@@ -1093,26 +1093,14 @@ public class OryxOsRuntime {
         agentExecutionService);
   }
 
-  @Bean
-  @DependsOn("flywayInitializer")
-  io.oryxos.storage.AgentRunSchemaUpgrade agentRunSchemaUpgrade(DataSource dataSource) {
-    return new io.oryxos.storage.AgentRunSchemaUpgrade(dataSource);
-  }
-
   /** 32 节：Agent 执行历史落 SQLite（手动触发 + 定时触发都记，起止时间 / 状态）。 */
   @Bean
-  AgentExecutionStore agentExecutionStore(
-      AgentExecutionRepository repository,
-      io.oryxos.storage.AgentRunSchemaUpgrade agentRunSchemaUpgrade) {
-    agentRunSchemaUpgrade.upgrade();
+  AgentExecutionStore agentExecutionStore(AgentExecutionRepository repository) {
     return new JpaAgentExecutionStore(repository);
   }
 
   @Bean
-  AgentRunEventStore agentRunEventStore(
-      AgentRunEventRepository repository,
-      io.oryxos.storage.AgentRunSchemaUpgrade agentRunSchemaUpgrade) {
-    agentRunSchemaUpgrade.upgrade();
+  AgentRunEventStore agentRunEventStore(AgentRunEventRepository repository) {
     return new JpaAgentRunEventStore(repository);
   }
 
@@ -1134,10 +1122,17 @@ public class OryxOsRuntime {
     return Executors.newVirtualThreadPerTaskExecutor();
   }
 
+  /** Run 工作台 SSE 推流：与 ReAct worker 隔离，避免互相饿死。 */
+  @Bean(destroyMethod = "shutdown")
+  @SuppressWarnings("PMD.ThreadPoolCreationRule")
+  ExecutorService agentRunStreamExecutor() {
+    return Executors.newVirtualThreadPerTaskExecutor();
+  }
+
   @Bean(initMethod = "reconcileOnStartup")
   AgentExecutionService agentExecutionService(
       AgentExecutionStore agentExecutionStore,
-      ExecutorService agentExecutionExecutor,
+      @Qualifier("agentExecutionExecutor") ExecutorService agentExecutionExecutor,
       AgentRunEventPublisher agentRunEventPublisher) {
     return new AgentExecutionService(
         agentExecutionStore,

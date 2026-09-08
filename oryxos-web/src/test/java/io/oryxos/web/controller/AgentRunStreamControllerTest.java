@@ -76,6 +76,46 @@ class AgentRunStreamControllerTest {
     assertTrue(body.contains(AgentRunEventTypes.RUN_FINISHED));
   }
 
+  @Test
+  void lastEventIdAdvancesCursorPastQueryAfter() throws Exception {
+    AgentExecutionService executions = mock(AgentExecutionService.class);
+    when(executions.findById(7L))
+        .thenReturn(
+            Optional.of(
+                new AgentExecution(
+                    7L,
+                    "ops",
+                    "manual",
+                    "s",
+                    Instant.parse("2026-08-23T04:00:00Z"),
+                    null,
+                    null,
+                    null,
+                    null)));
+    AgentRunEventStore store = mock(AgentRunEventStore.class);
+    when(store.readAfter(eq(7L), eq(40L), eq(500))).thenReturn(events(7L, 41, 1, true));
+
+    DeferredExecutor executor = new DeferredExecutor();
+    MockMvc mvc =
+        MockMvcBuilders.standaloneSetup(
+                new AgentRunStreamController(
+                    executions, store, new AgentRunEventHub(), executor, new ObjectMapper()))
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+
+    MvcResult started =
+        mvc.perform(get("/api/v1/runs/7/stream?after=10").header("Last-Event-ID", "40"))
+            .andExpect(request().asyncStarted())
+            .andReturn();
+    executor.runQueued();
+
+    MvcResult done = mvc.perform(asyncDispatch(started)).andExpect(status().isOk()).andReturn();
+    String body = done.getResponse().getContentAsString();
+    assertTrue(body.contains("\"sequence\":41"));
+    assertEquals(40L, AgentRunStreamController.parseLastEventId("40"));
+    assertEquals(0L, AgentRunStreamController.parseLastEventId("nope"));
+  }
+
   private static List<AgentRunEvent> events(
       long runId, long start, int count, boolean terminalLast) {
     Instant now = Instant.parse("2026-08-23T04:00:00Z");

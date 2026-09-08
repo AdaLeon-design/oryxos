@@ -51,8 +51,13 @@ export async function cancelRun(runId) {
   )
 }
 
+export function runStreamUrl(runId, after) {
+  const cursor = after == null || after === '' ? 0 : after
+  return `/api/v1/runs/${encodeURIComponent(runId)}/stream?after=${cursor}`
+}
+
 export function openRunStream(runId, after, onEvent, onError) {
-  const source = new EventSource(`/api/v1/runs/${encodeURIComponent(runId)}/stream?after=${after}`)
+  const source = new EventSource(runStreamUrl(runId, after))
   const types = [
     'RUN_STARTED',
     'STEP_STARTED',
