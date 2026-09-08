@@ -22,8 +22,10 @@
 | 项 | 结果 |
 |----|------|
 | Telegram `getMe` | 通过。Bot 是提交者**个人测试号**（username=`rchuangbot`），不是仓库官方 Bot，凭证只在本机 `.env` |
-| Telegram `getUpdates` | 空（该个人测试 Bot 尚无会话，无法取 `chat_id`） |
-| Telegram 私聊往返 / 群 @ / notify | 待该个人测试 Bot 先有一条私聊后，再补 `CONNECTED` + 回写 + notify |
+| Telegram 入站 `CONNECTED` | 本机 `oryxos serve` 后 `GET /api/v1/channels/status` 中 `ops-telegram` 为 `CONNECTED` |
+| Telegram 私聊往返 | 通过：个人测试 Bot 收到私聊后建了 `telegram:*:demo-agent` 会话（2 条消息），DeepSeek 已回写 |
+| Telegram `notify` | 通过：Bot API `sendMessage` 成功（个人测试会话） |
+| Telegram 群 `@Bot` | 未测（需要把该个人测试 Bot 拉进群并关 Privacy Mode） |
 | Slack `auth.test` | 通过（team=`OryxOS`）；`conversations.list` 缺 scope，未打真实频道 |
 | Discord `@me` | 通过（username=`OryxOS`）；列频道 403，未打真实频道 |
 | WhatsApp / Teams / GChat / Mattermost / Matrix | 无可用凭证，未宣称 COMPLETE |
