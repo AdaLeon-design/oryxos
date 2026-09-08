@@ -1,7 +1,7 @@
 # 026 验收记录
 
 **日期**: 2026-09-08  
-**范围**: 波次 0–5 代码 + 契约/归一化单测。真平台往返待你提供凭证后补。
+**范围**: 波次 0–5 代码 + 契约/归一化单测。真平台按已有凭证推进。
 
 ## 单测（本机 JDK 21）
 
@@ -17,13 +17,15 @@
 
 ## 真平台
 
-未在本环境发现 Slack/Discord/Telegram/WhatsApp/Teams/GChat/Mattermost/Matrix 可用 Token，**未宣称 COMPLETE 联调**。
+本机 `.env` 已有 Slack / Discord / Telegram 凭证（不入库）。2026-09-08 探测：
 
-请按各 `docs/*ChannelSetup.md` 注入环境变量后：
+| 项 | 结果 |
+|----|------|
+| Telegram `getMe` | 通过，username=`rchuangbot` |
+| Telegram `getUpdates` | 空（Bot 尚无会话，无法取 `chat_id`） |
+| Telegram 私聊往返 / 群 @ / notify | **待你先私聊 [@rchuangbot](https://t.me/rchuangbot) 一条**，再补 `CONNECTED` + 回写 + notify |
+| Slack `auth.test` | 通过（team=`OryxOS`）；`conversations.list` 缺 scope，未打真实频道 |
+| Discord `@me` | 通过（username=`OryxOS`）；列频道 403，未打真实频道 |
+| WhatsApp / Teams / GChat / Mattermost / Matrix | 无可用凭证，未宣称 COMPLETE |
 
-1. Slack / Discord：`notify` 各打一条进真实频道（波次 0）
-2. Telegram：私聊往返 + 群 @ + notify
-3. WhatsApp：WABA 回调挑战 + 窗内往返 + 窗外拒绝
-4. Teams：Azure Bot 1:1 / 频道 @
-5. Google Chat：Workspace DM / 空间 @
-6. Mattermost 然后 Matrix：自建实例私聊 / 房间 @
+管理台 Notify 已补齐 026 类型（原先 API 只允许飞书/企微/钉钉/webhook/email，适配器注册了也建不了渠道）。

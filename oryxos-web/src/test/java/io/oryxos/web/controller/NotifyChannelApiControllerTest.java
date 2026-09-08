@@ -78,7 +78,45 @@ class NotifyChannelApiControllerTest {
     mvc.perform(
             post("/api/v1/notify-channels")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"name\":\"x\",\"type\":\"telegram\",\"url\":\"https://x/hook\"}"))
+                .content("{\"name\":\"x\",\"type\":\"not-a-vendor\",\"url\":\"https://x/hook\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.code").value(400));
+    verify(registry, never()).save(any());
+  }
+
+  @Test
+  @DisplayName("create telegram token+chat_id_无 url_成功")
+  void create_telegramTokenChatId_returnsView() throws Exception {
+    when(registry.exists("ops-tg")).thenReturn(false);
+    when(registry.save(any()))
+        .thenReturn(
+            new NotifyChannelDef(
+                "ops-tg",
+                "telegram",
+                "",
+                "告警",
+                java.util.Map.of("token", "${TELEGRAM_BOT_TOKEN}", "chat_id", "1")));
+
+    mvc.perform(
+            post("/api/v1/notify-channels")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    "{\"name\":\"ops-tg\",\"type\":\"telegram\",\"url\":\"\","
+                        + "\"config\":{\"token\":\"${TELEGRAM_BOT_TOKEN}\",\"chat_id\":\"1\"}}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.data.type").value("telegram"));
+    verify(registry).save(any());
+  }
+
+  @Test
+  @DisplayName("create telegram 缺 token 与 url_返回400")
+  void create_telegramMissingTarget_returns400() throws Exception {
+    when(registry.exists("ops-tg")).thenReturn(false);
+
+    mvc.perform(
+            post("/api/v1/notify-channels")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"ops-tg\",\"type\":\"telegram\"}"))
         .andExpect(status().isBadRequest())
         .andExpect(jsonPath("$.code").value(400));
     verify(registry, never()).save(any());

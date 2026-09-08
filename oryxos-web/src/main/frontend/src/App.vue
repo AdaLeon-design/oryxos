@@ -966,7 +966,7 @@ async function deleteAgent(name) {
   } catch (e) { agents.value = { ...agents.value, error: e.message } }
 }
 
-// —— Notify 渠道管理（CRUD /api/v1/notify-channels）：命名的通知出口，type ∈ feishu/wecom/dingtalk/webhook/email ——
+// —— Notify 渠道管理（CRUD /api/v1/notify-channels）：命名的通知出口，含 026 海外 IM ——
 const notifyChannels = ref({ loading: false, error: null, data: [] })
 async function loadNotifyChannels() {
   notifyChannels.value = { loading: true, error: null, data: [] }
@@ -981,7 +981,39 @@ async function loadNotifyChannels() {
 }
 
 // 新建/编辑表单：editing 存被编辑渠道的 name（此时 name 只读），null 表示新建
-const nc = reactive({ open: false, editing: null, name: '', type: 'feishu', url: '', description: '', host: '', port: '', from: '', to: '', username: '', password: '', subject: '', encryption: '', busy: false, error: null })
+const nc = reactive({ open: false, editing: null, name: '', type: 'feishu', url: '', description: '', host: '', port: '', from: '', to: '', username: '', password: '', subject: '', encryption: '', token: '', chatId: '', channelId: '', phoneNumberId: '', homeserver: '', roomId: '', busy: false, error: null })
+
+function notifyNeedsUrl(type) {
+  return !['email', 'telegram', 'slack', 'discord', 'whatsapp', 'matrix'].includes(type)
+}
+
+function buildNotifyConfig() {
+  if (nc.type === 'email') return buildEmailConfig()
+  const config = {}
+  if (nc.token) config.token = nc.token
+  if (nc.type === 'telegram' && nc.chatId) config.chat_id = nc.chatId
+  if ((nc.type === 'slack' || nc.type === 'discord') && nc.channelId) config.channel_id = nc.channelId
+  if (nc.type === 'whatsapp') {
+    if (nc.phoneNumberId) config.phone_number_id = nc.phoneNumberId
+    if (nc.to) config.to = nc.to
+  }
+  if (nc.type === 'matrix') {
+    if (nc.homeserver) config.homeserver = nc.homeserver
+    if (nc.roomId) config.room_id = nc.roomId
+  }
+  return Object.keys(config).length ? config : undefined
+}
+
+function notifyFormReady() {
+  if (!nc.name) return false
+  if (nc.type === 'email') return !!(nc.host && nc.port && nc.from && nc.to)
+  if (nc.url) return true
+  if (nc.type === 'telegram') return !!(nc.token && nc.chatId)
+  if (nc.type === 'slack' || nc.type === 'discord') return !!(nc.token && nc.channelId)
+  if (nc.type === 'whatsapp') return !!(nc.token && nc.phoneNumberId && nc.to)
+  if (nc.type === 'matrix') return !!(nc.homeserver && nc.token && nc.roomId)
+  return false
+}
 
 async function saveNotifyChannel() {
   nc.busy = true; nc.error = null
@@ -989,10 +1021,9 @@ async function saveNotifyChannel() {
     const url = nc.editing
       ? `/api/v1/notify-channels/${encodeURIComponent(nc.editing)}`
       : '/api/v1/notify-channels'
-    const config = nc.type === 'email' ? buildEmailConfig() : undefined
-    let payload = nc.type === 'email'
-      ? { type: nc.type, url: '', config, description: nc.description }
-      : { type: nc.type, url: nc.url, description: nc.description }
+    const config = buildNotifyConfig()
+    let payload = { type: nc.type, url: nc.type === 'email' ? '' : nc.url, description: nc.description }
+    if (config) payload.config = config
     if (!nc.editing) payload = { name: nc.name, ...payload }
     const res = await fetch(url, {
       method: nc.editing ? 'PUT' : 'POST',
@@ -1014,6 +1045,8 @@ function editNotifyChannel(row) {
   const c = row.config || {}
   nc.host = c.host || ''; nc.port = c.port || ''; nc.from = c.from || ''; nc.to = c.to || ''
   nc.username = c.username || ''; nc.password = c.password || ''; nc.subject = c.subject || ''; nc.encryption = c.encryption || ''
+  nc.token = c.token || ''; nc.chatId = c.chat_id || ''; nc.channelId = c.channel_id || ''
+  nc.phoneNumberId = c.phone_number_id || ''; nc.homeserver = c.homeserver || ''; nc.roomId = c.room_id || ''
   nc.error = null
   nc.open = true
 }
@@ -1029,6 +1062,7 @@ function buildEmailConfig() {
 function cancelNc() {
   nc.open = false; nc.editing = null; nc.name = ''; nc.type = 'feishu'; nc.url = ''; nc.description = ''
   nc.host = ''; nc.port = ''; nc.from = ''; nc.to = ''; nc.username = ''; nc.password = ''; nc.subject = ''; nc.encryption = ''
+  nc.token = ''; nc.chatId = ''; nc.channelId = ''; nc.phoneNumberId = ''; nc.homeserver = ''; nc.roomId = ''
   nc.error = null
 }
 
@@ -3191,8 +3225,34 @@ const outputRows = computed(() =>
                     <option value="dingtalk">dingtalk</option>
                     <option value="webhook">webhook</option>
                     <option value="email">email</option>
+                    <option value="slack">slack</option>
+                    <option value="discord">discord</option>
+                    <option value="telegram">telegram</option>
+                    <option value="whatsapp">whatsapp</option>
+                    <option value="teams">teams</option>
+                    <option value="gchat">gchat</option>
+                    <option value="mattermost">mattermost</option>
+                    <option value="matrix">matrix</option>
                   </select>
-                  <input v-if="nc.type !== 'email'" v-model="nc.url" class="gen-input" placeholder="Webhook URL" />
+                  <input v-if="nc.type !== 'email'" v-model="nc.url" class="gen-input" :placeholder="notifyNeedsUrl(nc.type) ? 'Webhook URL' : 'Webhook URL（可选；也可用下方 token 字段）'" />
+                  <template v-if="nc.type === 'telegram'">
+                    <input v-model="nc.token" class="gen-input" placeholder="Bot Token（建议 ${TELEGRAM_BOT_TOKEN}）" />
+                    <input v-model="nc.chatId" class="gen-input" placeholder="chat_id（私聊数字 ID，群为负数）" />
+                  </template>
+                  <template v-if="nc.type === 'slack' || nc.type === 'discord'">
+                    <input v-model="nc.token" class="gen-input" placeholder="Bot Token（建议环境变量占位）" />
+                    <input v-model="nc.channelId" class="gen-input" placeholder="channel_id" />
+                  </template>
+                  <template v-if="nc.type === 'whatsapp'">
+                    <input v-model="nc.token" class="gen-input" placeholder="Graph access token" />
+                    <input v-model="nc.phoneNumberId" class="gen-input" placeholder="phone_number_id" />
+                    <input v-model="nc.to" class="gen-input" placeholder="to（E.164）" />
+                  </template>
+                  <template v-if="nc.type === 'matrix'">
+                    <input v-model="nc.homeserver" class="gen-input" placeholder="homeserver（https://matrix.example）" />
+                    <input v-model="nc.token" class="gen-input" placeholder="access token" />
+                    <input v-model="nc.roomId" class="gen-input" placeholder="room_id" />
+                  </template>
                   <template v-if="nc.type === 'email'">
                     <input v-model="nc.host" class="gen-input" placeholder="SMTP host（如 smtp.example.com）" />
                     <input v-model="nc.port" class="gen-input" placeholder="端口（465/587/25）" />
@@ -3209,12 +3269,12 @@ const outputRows = computed(() =>
                     </select>
                   </template>
                   <input v-model="nc.description" class="gen-input" placeholder="描述（可选）" />
-                  <p class="empty">{{ nc.editing ? '编辑现有渠道，渠道名不可改。' : 'type 支持 feishu / wecom / dingtalk / webhook / email；email 填 SMTP 多字段（密码建议 ${SMTP_PASSWORD} 环境变量占位），其余填 Webhook URL。' }}</p>
+                  <p class="empty">{{ nc.editing ? '编辑现有渠道，渠道名不可改。' : 'webhook 类填 URL；telegram / slack / discord 可改填 token + chat_id 或 channel_id；email 填 SMTP。凭证建议 ${ENV} 占位。' }}</p>
                   <p v-if="nc.error" class="error">{{ nc.error }}</p>
                 </div>
                 <div class="modal-foot">
                   <button class="btn" @click="cancelNc">取消</button>
-                  <button class="btn btn-primary" :disabled="nc.busy || !nc.name || (nc.type === 'email' ? !(nc.host && nc.port && nc.from && nc.to) : !nc.url)" @click="saveNotifyChannel">{{ nc.editing ? '保存修改' : '创建' }}</button>
+                  <button class="btn btn-primary" :disabled="nc.busy || !notifyFormReady()" @click="saveNotifyChannel">{{ nc.editing ? '保存修改' : '创建' }}</button>
                 </div>
               </div>
             </div>
