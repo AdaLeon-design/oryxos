@@ -26,7 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>薄转发给 {@link NotifyChannelRegistry}。错误码沿用既有口径：名字冲突 / 定义非法 → 400 （{@code
  * IllegalArgumentException}）；不存在 → 404（{@code ResourceNotFoundException}）；统一 {@code ApiResponse}
- * 信封。type 必须是已装配的渠道实现之一（webhook/feishu/wecom/dingtalk/email）。
+ * 信封。type 必须是已装配的渠道实现之一（含 026 海外 IM）。
  */
 @SuppressFBWarnings(
     value = {"SPRING_ENDPOINT", "EI_EXPOSE_REP2"},
@@ -37,12 +37,38 @@ import org.springframework.web.bind.annotation.RestController;
 public class NotifyChannelApiController {
 
   private static final String TYPE_EMAIL = "email";
+  private static final String TYPE_SLACK = "slack";
+  private static final String TYPE_DISCORD = "discord";
+  private static final String TYPE_TELEGRAM = "telegram";
+  private static final String TYPE_WHATSAPP = "whatsapp";
+  private static final String TYPE_MATRIX = "matrix";
+  private static final String CFG_URL = "url";
+  private static final String CFG_TOKEN = "token";
+  private static final String CFG_CHANNEL_ID = "channel_id";
+  private static final String CFG_CHAT_ID = "chat_id";
+  private static final String CFG_PHONE_NUMBER_ID = "phone_number_id";
+  private static final String CFG_TO = "to";
+  private static final String CFG_HOMESERVER = "homeserver";
+  private static final String CFG_ROOM_ID = "room_id";
 
   /** email 渠道 port 的合法上限（TCP 端口最大值）。 */
   private static final int MAX_PORT = 65535;
 
   private static final Set<String> SUPPORTED_TYPES =
-      Set.of("webhook", "feishu", "wecom", "dingtalk", TYPE_EMAIL);
+      Set.of(
+          "webhook",
+          "feishu",
+          "wecom",
+          "dingtalk",
+          TYPE_EMAIL,
+          TYPE_SLACK,
+          TYPE_DISCORD,
+          TYPE_TELEGRAM,
+          TYPE_WHATSAPP,
+          "teams",
+          "gchat",
+          "mattermost",
+          TYPE_MATRIX);
 
   private final NotifyChannelRegistry registry;
 
@@ -135,9 +161,55 @@ public class NotifyChannelApiController {
     }
     if (TYPE_EMAIL.equals(type)) {
       validateEmail(config);
-    } else if (url == null || url.isBlank()) {
-      throw new IllegalArgumentException("渠道 url 为空");
+      return;
     }
+    if (hasText(url) || hasConfig(config, CFG_URL)) {
+      return;
+    }
+    if (TYPE_SLACK.equals(type) || TYPE_DISCORD.equals(type)) {
+      requireConfigPair(config, type, CFG_TOKEN, CFG_CHANNEL_ID);
+      return;
+    }
+    if (TYPE_TELEGRAM.equals(type)) {
+      requireConfigPair(config, type, CFG_TOKEN, CFG_CHAT_ID);
+      return;
+    }
+    if (TYPE_WHATSAPP.equals(type)) {
+      requireConfigKeys(config, type, CFG_TOKEN, CFG_PHONE_NUMBER_ID, CFG_TO);
+      return;
+    }
+    if (TYPE_MATRIX.equals(type)) {
+      requireConfigKeys(config, type, CFG_HOMESERVER, CFG_TOKEN, CFG_ROOM_ID);
+      return;
+    }
+    throw new IllegalArgumentException("渠道 url 为空");
+  }
+
+  private static void requireConfigPair(
+      Map<String, String> config, String type, String first, String second) {
+    if (hasConfig(config, first) && hasConfig(config, second)) {
+      return;
+    }
+    throw new IllegalArgumentException(type + " 渠道缺少 url，或缺少 " + first + " + " + second);
+  }
+
+  private static void requireConfigKeys(Map<String, String> config, String type, String... keys) {
+    if (config == null) {
+      throw new IllegalArgumentException(type + " 渠道缺少配置（需 " + String.join(" + ", keys) + "）");
+    }
+    for (String key : keys) {
+      if (!hasConfig(config, key)) {
+        throw new IllegalArgumentException(type + " 渠道缺少 url，或缺少 " + String.join(" + ", keys));
+      }
+    }
+  }
+
+  private static boolean hasConfig(Map<String, String> config, String key) {
+    return config != null && hasText(config.get(key));
+  }
+
+  private static boolean hasText(String value) {
+    return value != null && !value.isBlank();
   }
 
   private static void validateEmail(Map<String, String> config) {
@@ -170,6 +242,9 @@ public class NotifyChannelApiController {
   }
 
   private static String normalizeUrl(String type, String url) {
-    return TYPE_EMAIL.equals(type) ? "" : url;
+    if (TYPE_EMAIL.equals(type)) {
+      return "";
+    }
+    return url == null ? "" : url;
   }
 }
